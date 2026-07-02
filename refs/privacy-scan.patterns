@@ -1,0 +1,105 @@
+# Privacy Scan Patterns · Phase 0 隐私嗅探最小集
+
+> R7：中英双覆盖 + 凭据文件名 glob + 高熵串启发式。
+> 召回优先（漏嗅探 = 隐私保护失效）；误报由用户在 kb-bootstrap-plan.md 人审排除。
+
+## 文件名 glob（大小写不敏感）
+
+### 中文
+```
+*账号*
+*账户*
+*密码*
+*口令*
+*证件*
+身份证*
+护照*
+银行卡*
+```
+
+### 英文
+```
+*password*
+*passwd*
+*credentials*
+*credential*
+*secret*
+*token*
+*apikey*
+*api_key*
+*private*
+*sensitive*
+```
+
+### 凭据文件
+```
+*.pem
+*.key
+*.keystore
+*.p12
+*.pfx
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+.env
+.env.*
+.aws/credentials
+.aws/config
+.gnupg/
+.ssh/
+htpasswd
+.netrc
+```
+
+## 内容高熵串启发式（扫描 `.md` / `.txt` / `.json` / `.ini` / `.yaml`）
+
+```
+sk-[a-zA-Z0-9]{20,}              # OpenAI/DeepSeek/Moonshot 等 API key
+AKIA[0-9A-Z]{16}                 # AWS access key
+gh[pousr]_[0-9A-Za-z]{36}        # GitHub token
+xox[baprs]-[0-9A-Za-z-]{10,}     # Slack token
+AIza[0-9A-Za-z\-_]{35}           # Google API key
+-----BEGIN .*PRIVATE KEY-----    # PEM 私钥块
+```
+
+## 扫描范围与排除
+
+**扫描**：仓库根下所有文件（含隐藏，除下方排除）。
+**排除**：`.git/` `.obsidian/` `node_modules/` `__pycache__/` `.venv/` `venv/` 以及 `.meta/`（脚本自身）。
+
+## 嗅探结果去向（写入 kb-bootstrap-plan.md 供人审 + 生成 .meta/rules/category-privacy.md）
+
+**category-privacy.md 生成契约**（对齐 common.py `_load_privacy_dirs()` 消费端）：
+- `## 隐私目录` 段下，每行一个**裸目录名**列表项：`- 000【备忘录-账号密码】`
+- **禁**尾斜杠（`- 000【备忘录】/`）、**禁**行内注释（`- 000【备忘录】 （命中 N 个）`）——否则不被识别
+- 散落敏感文件（含路径）放 `## 受保护文件` 段（仅人审，机制不自动排除）
+- 完整模板见 `templates/category-privacy.md`
+
+同时写入 `kb-bootstrap-plan.md` 的"隐私嗅探结果"段供人审：
+
+```markdown
+## 隐私嗅探结果
+
+### 命中文件（需人审确认是否纳入隐私保护）
+- `path/to/file.md` — 命中模式：`*账号*`
+- ...
+
+### 建议隐私目录（裸目录名，对齐 category-privacy.md 消费契约）
+基于命中文件的公共父目录，建议以下目录写入 `.meta/rules/category-privacy.md` 的「## 隐私目录」段：
+- 000【备忘录】
+- ...
+
+### 散落敏感文件（建议移入隐私子目录后纳入，机制不自动排除散落文件）
+- `path/to/standalone-secret.md` — 命中模式：`*token*`
+- ...
+
+**用户确认**：[ ] 全部纳入 / [ ] 仅 ______ / [ ] 都不纳入
+```
+
+## 召回率自检（完工验证）
+
+在含已知凭据的测试 fixture 上验证嗅探命中：
+- fixture 含中英凭据文件名各 2 个、PEM 私钥 1 个、`sk-` key 1 个
+- 期望：全部 6 个命中
+- 若漏判 → 补 pattern

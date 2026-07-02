@@ -1,0 +1,18 @@
+# init-kb-harness — Phase 1 脚本依赖
+#
+# 注：Python 标准库（os / sys / re / json / pathlib / hashlib / subprocess / socket /
+#     posixpath / collections / dataclasses / typing / urllib / datetime / sqlite3 /
+#     gzip / argparse / math / tempfile / shutil / csv / time / struct / inspect /
+#     functools / __future__）不在本清单中。
+#
+# 第三方依赖：
+
+requests>=2.28
+python-frontmatter>=1.0
+numpy>=1.24
+networkx>=3.0
+
+# 可选 / 已知软依赖：
+# - ask.py 顶层 `from bm25_index import search` ——bm25_index.py 属 Phase 2 bundle，
+#   Phase 1 下 ask.py 若需运行 BM25/hybrid 模式需自行补齐 bm25_index.py（并加装 rank-bm25）；
+#   无该模式时可在 ask.py 注释掉该 import。

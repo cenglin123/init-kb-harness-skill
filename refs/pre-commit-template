@@ -1,0 +1,79 @@
+#!/bin/bash
+# init-kb-harness pre-commit hook（精简版，Phase 1）
+# 1. 检查 AGENTS.md / CLAUDE.md / GEMINI.md 是否一致（若三文件存在）
+# 2. 扫描疑似 API key 泄露
+# 3. 隐私目录写入拦截（若 .meta/rules/category-privacy.md 定义了隐私目录）
+
+STAGED_FILES=$(git diff --cached --name-only)
+
+# ─── 1. 三文件一致性（若启用 sync_agents.py）───
+AGENTS_FILE="AGENTS.md"
+CLAUDE_FILE="CLAUDE.md"
+GEMINI_FILE="GEMINI.md"
+if [ -f "$AGENTS_FILE" ] && [ -f "$CLAUDE_FILE" ] && [ -f "$GEMINI_FILE" ]; then
+    if command -v md5sum &> /dev/null; then
+        A=$(md5sum "$AGENTS_FILE" | cut -d' ' -f1)
+        C=$(md5sum "$CLAUDE_FILE" | cut -d' ' -f1)
+        G=$(md5sum "$GEMINI_FILE" | cut -d' ' -f1)
+    elif command -v md5 &> /dev/null; then
+        A=$(md5 -q "$AGENTS_FILE"); C=$(md5 -q "$CLAUDE_FILE"); G=$(md5 -q "$GEMINI_FILE")
+    else
+        A=""; C=""; G=""
+    fi
+    if [ -n "$A" ] && { [ "$A" != "$C" ] || [ "$A" != "$G" ]; }; then
+        echo "⚠️  AGENTS.md / CLAUDE.md / GEMINI.md 不一致。运行 python .meta/scripts/sync_agents.py 后重试。"
+        exit 1
+    fi
+fi
+
+# ─── 2. API key 泄露扫描 ───
+KEY_LEAK_PATTERN='sk-[a-zA-Z0-9]{20,}'
+KEY_LEAK_WHITELIST='^(\.env\.example|.*\.example\..*)'
+KEY_HITS=""
+while IFS= read -r path; do
+    echo "$path" | grep -qE "$KEY_LEAK_WHITELIST" && continue
+    [ ! -f "$path" ] && continue
+    if grep -qE "$KEY_LEAK_PATTERN" "$path" 2>/dev/null; then
+        KEY_HITS="$KEY_HITS\n  - $path"
+    fi
+done <<< "$STAGED_FILES"
+if [ -n "$KEY_HITS" ]; then
+    echo "⚠️  检测到疑似 API key 泄露："
+    echo -e "$KEY_HITS"
+    echo "API-KEY 必须走 .env。"
+    exit 1
+fi
+
+# ─── 3. 隐私目录写入拦截 ───
+# 注意：common.py 用 Python \w 正则解析同文件，匹配稍宽；本 hook 是更粗的守卫，
+# 二者并存可接受（hook 漏报由 Python 侧补，Python 不在场时 hook 仍能挡住主要风险）。
+PRIVACY_FILE=".meta/rules/category-privacy.md"
+PRIVACY_DIRS_LIST=""
+# env 优先（支持任意格式目录名，含英文）
+if [ -n "$PRIVACY_DIRS" ]; then
+    PRIVACY_DIRS_LIST="$PRIVACY_DIRS"
+elif [ -f "$PRIVACY_FILE" ]; then
+    # 从 category-privacy.md 提取：NNN【name】格式 + 反引号/引号内的目录名 + 形如 xxx/ 的路径
+    # 注：bash grep 的中文范围不可移植，这里靠【】字面 + 路径斜杠兜底
+    PRIVACY_DIRS_LIST=$(grep -oE '[A-Za-z0-9]+【[^】]+】|`[^`]+/`|private/|secrets/|credentials/' "$PRIVACY_FILE" 2>/dev/null | tr '\n' ',' | sed 's/`//g')
+fi
+if [ -n "$PRIVACY_DIRS_LIST" ]; then
+    PRIVACY_HITS=""
+    while IFS= read -r path; do
+        IFS=',' read -ra DIRS <<< "$PRIVACY_DIRS_LIST"
+        for pdir in "${DIRS[@]}"; do
+            [ -z "$pdir" ] && continue
+            case "$path" in
+                "$pdir"/*) PRIVACY_HITS="$PRIVACY_HITS\n  - $path ($pdir)" ;;
+            esac
+        done
+    done <<< "$STAGED_FILES"
+    if [ -n "$PRIVACY_HITS" ]; then
+        echo "⚠️  检测到隐私目录文件被 stage："
+        echo -e "$PRIVACY_HITS"
+        echo "隐私目录受 $PRIVACY_FILE 保护，禁止提交。"
+        exit 1
+    fi
+fi
+
+exit 0
