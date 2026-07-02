@@ -569,6 +569,10 @@ def main() -> int:
     if '--frontmatter' in sys.argv:
         if harness == 'opencode':
             output_frontmatter(opencode_state=read_opencode_model_state())
+        elif harness == 'unknown':
+            # harness 未识别（非 cc-switch/opencode）：不 fall through 读
+            # ANTHROPIC_*/cc-switch 假装 Claude Code；输出 model: unknown，请人工标注
+            output_frontmatter()
         else:
             cfg = resolve_effective_config()
             output_frontmatter(cfg, read_ccswitch_active('claude'))
@@ -611,6 +615,19 @@ def main() -> int:
         print('  - 模型来源：opencode.db session 表最新行（权威，随会话切换实时更新）')
         print('  - 不读 ANTHROPIC_* env / .claude/settings.json / cc-switch.db（避免 Claude Code 残留假阳性）')
         print('  - 内置 provider（zhipuai-coding-plan 等）不在 opencode.json 中，仅 auth.json 有凭据')
+        return 0
+
+    # === unknown 分支：harness 非 cc-switch/opencode ===
+    # detect_harness 兜底为 unknown（非 Claude Code、非 opencode 的公开用户场景）。
+    # 不 fall through 读 ANTHROPIC_*/cc-switch 假装已知 harness——那样会把任意环境里
+    # 残留的 .claude/settings.json 误报为 Claude Code。诚实降级为 unknown，请人工标注。
+    if harness == 'unknown':
+        print('Provider: 未识别（harness 非 cc-switch/opencode）')
+        print()
+        print('提示：')
+        print('  - detect_harness 未识别为 Claude Code 或 opencode')
+        print('  - 不读 ANTHROPIC_* env / .claude / cc-switch（避免假装已知 harness）')
+        print('  - 请人工在 frontmatter 标注 model 字段')
         return 0
 
     # === Claude Code 分支（原逻辑，保持不变） ===

@@ -49,7 +49,7 @@
 
 ## 第三部 · 知识库治理体系（多轴门控）
 
-> 治理体系的完整设计见蓝本仓库 `docs/CONSTITUTION.md` 第五点五部。本节为精简指针。
+> 详细设计见本 bundle [refs/governance-multi-axis.md](governance-multi-axis.md)。
 
 治理体系下事务按**门控轴**切分，轴集合开放可扩展。当前 3 条：
 

@@ -37,7 +37,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 | **自沉淀**（memory + 衰减） | 知识复利 | memory/ 结构 + dream.py（Phase 2） |
 | **自运行**（入口 + 检索 + 硬约束） | 全部四目标的跨会话可持续 | AGENTS.md + ask.py + pre-commit hook |
 
-"三自"只是这三组机制的简称，非新理论。
+"三自"只是这三组机制的简称，非新理论；上表与四目标的映射是教学性归类，非因果推导依据。
 
 ---
 
@@ -70,7 +70,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 #### Phase 1b（`30≤notes≤200` 追加）
 
-补：`health_report.py`（阈值已参数化）+ `build_graph.py` + `inbox_scan.py`（prompt 已清空本库示例）+ `check_sidecar_sources.py` + `detect_renames.py` + `whoami.py` + `changelog_append.py`
+补：`health_report.py`（阈值已参数化）+ `build_graph.py` + `inbox_scan.py`（prompt 已去特定仓库示例）+ `check_sidecar_sources.py` + `detect_renames.py` + `whoami.py` + `changelog_append.py`
 
 #### Bootstrap 完成判定
 
@@ -113,7 +113,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 | 文件类 | 重跑行为 | 理由 |
 |--------|---------|------|
-| `scripts/*.py` + maintain-lite.py | **覆盖**（以 skill bundle 为准） | 脚本是机械产物，drift 由 skill-sync-check 检测 |
+| `scripts/*.py` + maintain-lite.py | **覆盖**（以 skill bundle 为准） | 脚本是机械产物，以 skill bundle 为准覆盖 |
 | `refs/` 模板（constitution/agents/pre-commit） | **覆盖** | 模板随 skill 演进 |
 | `.env` | **跳过若存在** | 含用户 API key / PRIMARY_HOST / 阈值，覆盖会清掉用户配置 |
 | `.meta/rules/category-privacy.md` | **跳过若存在** | Phase 0 嗅探结果 + 用户人审，不可覆盖 |
@@ -122,6 +122,18 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 | `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **覆盖**（经 sync_agents.py） | 由 AGENTS 模板生成 |
 
 **Phase 1→2 切换**：装 Phase 2 时**删除** `maintain-lite.py`、拷贝完整 `maintain.py`，并把 AGENTS.md 的 `bootstrap_phase` 从 `1a`/`1a+1b` 改为 `+2`、常用脚本段 `maintain-lite.py` 引用改为 `maintain.py`，重跑 sync_agents.py。
+
+### bootstrap_phase 状态机
+
+`bootstrap_phase` 字段枚举 ∈ `{1a, 1a+1b, +2, +3}`。转换清单：
+
+| 当前 | 目标 | 触发 | 脚本动作 | frontmatter 字段 |
+|------|------|------|----------|------------------|
+| `1a` | `1a+1b` | 用户完成 Phase 1b | 覆盖拷贝 1b 脚本 | `bootstrap_phase` 改 `1a+1b` |
+| `1a+1b` | `+2` | 用户开始 Phase 2 | 删 maintain-lite + 拷 maintain.py | `bootstrap_phase` 改 `+2`；跑 sync_agents |
+| `+2` | `+3` | 用户开始 Phase 3 | 建 `.meta/{converge,deliberations,audit}/` + 装 `check_plan_status.py` + hook 换完整版 + CONSTITUTION 升级 | `bootstrap_phase` 改 `+3` |
+
+完成判定：每个转换后跑对应 Phase 的 `maintain[-lite] --full` 验证幂等。
 
 重复触发本技能时，先读目标仓库 AGENTS.md 的 `bootstrap_status` 与 `bootstrap_phase`：
 - `bootstrap_status: in_progress` + `bootstrap_phase` 标识中断处（如读到 `1a` → 补装到 `1a+1b`；读到 `1a+1b` 且 notes>200 → 建议 Phase 2）
@@ -156,7 +168,7 @@ target-vault/
 1. **不健全仓库与 harness 的矛盾**：`notes<10` 时提示"自重可能超内容，建议先攒内容"；Phase 1a 是最小缓解，非消除。
 2. **单用户单机假设**：本 harness 默认单机模型。多用户/多机仓库的主从边界、治理需 Phase 3 重新评估。
 3. **API 后端**：Phase 1 默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。
-4. **快照维护债**：bundle 脚本会与本库演进 drift。跑 `scripts/skill-sync-check.py` 检测（默认本库路径，可 `--vault` 覆盖）。建议每 N 个月核对一次。
+4. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
 
 ---
 

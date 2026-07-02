@@ -290,8 +290,7 @@ def _insert_changelog_entry_safe(changelog_path, start, full, bullets, skip_chan
 
 
 def update_maintenance_docs(changelog_path, current_path, start, skip_changelog=False):
-    """维护文档刷新——lite 版不做本库 CHANGELOG 历史清理（cleanup_empty_changelog_entries），
-    避免对本库外的 vault 误删条目。仅安全地更新 CURRENT.md。"""
+    """维护文档刷新——CHANGELOG 历史清理跳过（精简版不处理历史条目清理），仅安全地更新 CURRENT.md。"""
     update_current_status(current_path, start)
 
 

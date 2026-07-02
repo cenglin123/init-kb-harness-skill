@@ -1,0 +1,213 @@
+#!/bin/bash
+# init-kb-harness pre-commit hook（完整版，Phase 3）
+#
+# Phase 1-2 用 pre-commit-template（精简版）；Phase 3 升级时覆盖为本文件。
+# 升级方法：cp refs/pre-commit-full-template .githooks/pre-commit
+#
+# 检查项：
+#   1. plan status 完整检查（依赖 check_plan_status.py，Phase 3 额外装）
+#   2. plan 假完成检查（frontmatter 正则，无外部依赖）
+#   3. 评议/审计未归档提醒（软警告，Phase 3 治理模块装后生效）
+#   4. 治理文档变更提醒（参数化：读 .meta/governed-files.txt，存在则用、不存在跳过）
+#   5. API key 泄露扫描
+#   6. 隐私目录写入拦截（若 category-privacy.md 定义）
+#   7. 三文件一致性（AGENTS/CLAUDE/GEMINI MD5）
+#
+# 去耦说明（相对 vault 蓝本 .githooks/pre-commit）：
+#   - 通用保留：三文件 MD5、API key 扫描、隐私目录拦截、plan 假完成检查
+#   - 参数化：GOV 检测从硬编码 GOV_PATTERNS 改为读 .meta/governed-files.txt
+#   - 删除：.converge 路径纠正（vault 本地惯例，外部仓库无 .converge/）
+#   - 依赖声明：plan status 完整检查需 check_plan_status.py（Phase 3 装）
+
+STAGED_FILES=$(git diff --cached --name-only)
+
+# ─── 1. plan status 完整检查（依赖 check_plan_status.py） ───
+# 注：此检查依赖 .meta/scripts/check_plan_status.py（不在 Phase 1-2 bundle）。
+# Phase 3 用户额外安装该脚本后启用；脚本缺失时跳过（不报错）。
+PLAN_STATUS_CHECK_NEEDED=0
+while IFS= read -r path; do
+    case "$path" in
+        docs/plans/*) PLAN_STATUS_CHECK_NEEDED=1 ;;
+    esac
+done <<< "$STAGED_FILES"
+
+if [ "$PLAN_STATUS_CHECK_NEEDED" -eq 1 ]; then
+    if [ -f ".meta/scripts/check_plan_status.py" ]; then
+        if ! python .meta/scripts/check_plan_status.py --full; then
+            echo ""
+            echo "⚠️  docs/plans 状态检查失败。"
+            echo "请先修正 frontmatter status 与目录一致，再重新 stage/commit。"
+            exit 1
+        fi
+    fi
+fi
+
+# ─── 2. plan 假完成检查（frontmatter 正则，无外部依赖） ───
+# 检查 docs/plans 中 status:done 的 plan 文件是否还有未勾选的完工清单项
+# 防止"假完成"：status:done 但完工检查清单仍残留 - [ ]
+PLAN_FAKE_DONE_HITS=""
+while IFS= read -r path; do
+    case "$path" in
+        docs/plans/*.md)
+            [ ! -f "$path" ] && continue
+            if head -20 "$path" | grep -q 'status:\s*done'; then
+                if grep -qE '^\s*- \[ \]' "$path"; then
+                    PLAN_FAKE_DONE_HITS="$PLAN_FAKE_DONE_HITS\n  - $path"
+                fi
+            fi
+            ;;
+    esac
+done <<< "$STAGED_FILES"
+
+if [ -n "$PLAN_FAKE_DONE_HITS" ]; then
+    echo "⚠️  Git commit 被拒绝：plan 假完成"
+    echo ""
+    echo "以下 plan 文件 frontmatter 声明 status: done，但完工检查清单仍有未勾选项 (- [ ])："
+    echo -e "$PLAN_FAKE_DONE_HITS"
+    echo ""
+    echo "请将所有完工检查清单项勾选为 - [x] 后再提交。"
+    exit 1
+fi
+
+# ─── 3. 评议/审计未归档提醒（软警告，不拦截） ───
+# Phase 3 安装 .meta/{converge,deliberations,audit}/ 后生效；目录不存在时静默跳过。
+STALE_DELIBERATIONS=$(find .meta/deliberations/active/ -type f -name "*.md" 2>/dev/null)
+STALE_AUDITS=$(find .meta/audit/active/ -type f -name "*.md" 2>/dev/null)
+
+if [ -n "$STALE_DELIBERATIONS" ] || [ -n "$STALE_AUDITS" ]; then
+    echo "📋 尚有未归档的评议/审计报告（软警告，不拦截提交）"
+    if [ -n "$STALE_DELIBERATIONS" ]; then
+        echo "  .meta/deliberations/active/ 中有未归档报告："
+        echo "$STALE_DELIBERATIONS" | sed 's/^/    - /'
+    fi
+    if [ -n "$STALE_AUDITS" ]; then
+        echo "  .meta/audit/active/ 中有未归档报告："
+        echo "$STALE_AUDITS" | sed 's/^/    - /'
+    fi
+    echo "  若已完成，请将报告移至对应 done/ 目录。"
+fi
+
+# ─── 4. 治理文档变更提醒（参数化：读 .meta/governed-files.txt） ───
+# GOV 检测不硬绑路径——目标仓库通过 .meta/governed-files.txt 自定义治理边界。
+# 文件存在则按其每行 glob 检测；不存在则整段跳过（不硬绑 vault 路径）。
+# 每行一项 glob（# 开头注释、空行跳过）。
+GOV_LIST=".meta/governed-files.txt"
+if [ -f "$GOV_LIST" ]; then
+    SSOT_CHANGED=0
+    GOV_HITS=""
+    while IFS= read -r path; do
+        # SSOT 自身变更
+        if [ "$path" = "$GOV_LIST" ]; then
+            SSOT_CHANGED=1
+        fi
+        # 与清单每行 glob 匹配
+        while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            case "$pattern" in '#'*) continue ;; esac
+            case "$path" in
+                $pattern)
+                    GOV_HITS="$GOV_HITS\n  - $path"
+                    break
+                    ;;
+            esac
+        done < "$GOV_LIST"
+    done <<< "$STAGED_FILES"
+
+    if [ "$SSOT_CHANGED" -eq 1 ]; then
+        echo "📋 检测到治理文档 SSOT 变更（$GOV_LIST）"
+        echo "  SSOT 定义了治理文档清单边界，改此文件相当于改写全部门控边界。"
+        echo "  按宪法要求必须走 ultraverge 流程（≥3 Reviewer + 收敛 + 设计审查）。"
+    fi
+    if [ -n "$GOV_HITS" ]; then
+        echo "📋 检测到治理文档变更（软警告，不拦截提交）"
+        echo -e "$GOV_HITS"
+        echo "  按宪法要求，治理文档改动应走 ultraverge 流程（≥3 Reviewer 评议 + 收敛 + 设计审查）。"
+    fi
+fi
+
+# ─── 5. API key 泄露扫描 ───
+KEY_LEAK_PATTERN='sk-[a-zA-Z0-9]{20,}'
+KEY_LEAK_WHITELIST_REGEX='^(\.env\.example|\.meta/tests/|\.meta/deliberations/templates/|.*\.example\..*)'
+KEY_LEAK_HITS=""
+while IFS= read -r path; do
+    echo "$path" | grep -qE "$KEY_LEAK_WHITELIST_REGEX" && continue
+    [ ! -f "$path" ] && continue
+    if grep -qE "$KEY_LEAK_PATTERN" "$path" 2>/dev/null; then
+        hit_lines=$(grep -nE "$KEY_LEAK_PATTERN" "$path" 2>/dev/null | head -3 | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+        KEY_LEAK_HITS="$KEY_LEAK_HITS\n  - $path (行 $hit_lines)"
+    fi
+done <<< "$STAGED_FILES"
+
+if [ -n "$KEY_LEAK_HITS" ]; then
+    echo "⚠️  Git commit 被拒绝：检测到疑似 API key 泄露"
+    echo ""
+    echo "以下 stage 文件含 \`sk-[a-zA-Z0-9]{20,}\` 模式（疑似真实 API key）："
+    echo -e "$KEY_LEAK_HITS"
+    echo ""
+    echo "API-KEY 必须走 \`.env\`。"
+    echo "如确属占位符 / 测试 fixture，将路径前缀加到 KEY_LEAK_WHITELIST_REGEX。"
+    exit 1
+fi
+
+# ─── 6. 隐私目录写入拦截 ───
+# 注意：common.py 用 Python \w 正则解析同文件，匹配稍宽；本 hook 是更粗的守卫。
+PRIVACY_FILE=".meta/rules/category-privacy.md"
+PRIVACY_DIRS_LIST=""
+if [ -n "$PRIVACY_DIRS" ]; then
+    PRIVACY_DIRS_LIST="$PRIVACY_DIRS"
+elif [ -f "$PRIVACY_FILE" ]; then
+    PRIVACY_DIRS_LIST=$(grep -oE '[A-Za-z0-9]+【[^】]+】|`[^`]+/`|private/|secrets/|credentials/' "$PRIVACY_FILE" 2>/dev/null | tr '\n' ',' | sed 's/`//g')
+fi
+if [ -n "$PRIVACY_DIRS_LIST" ]; then
+    PRIVACY_HITS=""
+    while IFS= read -r path; do
+        IFS=',' read -ra DIRS <<< "$PRIVACY_DIRS_LIST"
+        for pdir in "${DIRS[@]}"; do
+            [ -z "$pdir" ] && continue
+            case "$path" in
+                "$pdir"/*) PRIVACY_HITS="$PRIVACY_HITS\n  - $path ($pdir)" ;;
+            esac
+        done
+    done <<< "$STAGED_FILES"
+    if [ -n "$PRIVACY_HITS" ]; then
+        echo "⚠️  Git commit 被拒绝：检测到隐私目录文件被 stage"
+        echo -e "$PRIVACY_HITS"
+        echo "隐私目录受 $PRIVACY_FILE 保护，禁止提交。"
+        exit 1
+    fi
+fi
+
+# ─── 7. 三文件一致性（AGENTS/CLAUDE/GEMINI MD5） ───
+AGENTS_FILE="AGENTS.md"
+CLAUDE_FILE="CLAUDE.md"
+GEMINI_FILE="GEMINI.md"
+
+if [ ! -f "$AGENTS_FILE" ] || [ ! -f "$CLAUDE_FILE" ] || [ ! -f "$GEMINI_FILE" ]; then
+    exit 0
+fi
+
+if command -v md5sum &> /dev/null; then
+    AGENTS_MD5=$(md5sum "$AGENTS_FILE" | cut -d' ' -f1)
+    CLAUDE_MD5=$(md5sum "$CLAUDE_FILE" | cut -d' ' -f1)
+    GEMINI_MD5=$(md5sum "$GEMINI_FILE" | cut -d' ' -f1)
+elif command -v md5 &> /dev/null; then
+    AGENTS_MD5=$(md5 -q "$AGENTS_FILE")
+    CLAUDE_MD5=$(md5 -q "$CLAUDE_FILE")
+    GEMINI_MD5=$(md5 -q "$GEMINI_FILE")
+else
+    exit 0
+fi
+
+if [ "$AGENTS_MD5" != "$CLAUDE_MD5" ] || [ "$AGENTS_MD5" != "$GEMINI_MD5" ]; then
+    echo "⚠️  Git commit 被拒绝"
+    echo ""
+    echo "AGENTS.md、CLAUDE.md、GEMINI.md 三个文件的内容不一致。"
+    echo ""
+    echo "正确的流程："
+    echo "  1. 编辑 AGENTS.md（不要编辑 CLAUDE.md 或 GEMINI.md）"
+    echo "  2. 运行：python .meta/scripts/sync_agents.py"
+    echo "  3. 再次提交"
+    exit 1
+fi
+
+exit 0

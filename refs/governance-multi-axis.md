@@ -1,7 +1,6 @@
 # Governance Multi-Axis · 治理体系多轴概念指针
 
 > Phase 3（治理）安装时引用。本文件不重复定义治理体系，只给指针与最小安装说明。
-> 完整设计见蓝本仓库 `docs/CONSTITUTION.md` 第五点五部。
 
 ## 总称
 
