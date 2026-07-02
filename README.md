@@ -79,9 +79,8 @@ Installation 仅指 Phase 1a 的机械步骤。Phase 0（体检 + 隐私嗅探 +
 
 本 skill 的 bundle 脚本（`scripts/*.py`）与作者自用知识库的 `.meta/scripts/` 演进会 drift。
 
-- 历史上 bundle 内置 `scripts/skill-sync-check.py` 做 drift 检测；现**已从 bundle 移除**（对 99% 公开用户是死代码——他们没有上游可 drift）。
-- 作者本人将 `skill-sync-check.py` 保留为 vault 内维护脚本（不公开发布）。
-- **fork / 同步上游时**：在源 vault 用 `HARNESS_SOURCE_VAULT=/path/to/source/vault python skill-sync-check.py` 做 SHA256 逐脚本比对。
+- v0.2 移除了 bundle 内的 `skill-sync-check.py`（自重 ≥ 承重：仅服务作者一人，手动 diff 一行命令等价替代）。
+- 维护者检测 drift：`diff -r ~/.agents/skills/init-kb-harness/scripts/ <源仓库>/.meta/scripts/`（源仓库 = 作者的 vault，或 forker 的上游 fork）。
 
 ---
 

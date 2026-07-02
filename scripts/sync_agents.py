@@ -154,6 +154,17 @@ def check_gov_consistency() -> int:
     t_agents_raw = set(parse_agents_paragraph(agents_file))
     t_hook_raw = set(parse_hook_gov_patterns(hook_file))
 
+    # hook 委托判据：无 GOV_PATTERNS 字面 AND 引用 governed-files.txt
+    # （排除混合 hook：vault 自身 hook 同时含 GOV_PATTERNS 字面 + governed-files.txt 引用，
+    #   那不是委托——必须走 parse+compare 才能检出 vault 的 GOV_PATTERNS⇔SSOT drift）
+    hook_content = hook_file.read_text(encoding='utf-8')
+    hook_delegates = (not t_hook_raw) and ('governed-files.txt' in hook_content)
+    if hook_delegates:
+        # hook 读 SSOT → 一致由构造保证
+        t_hook_effective = set(t_ssot)
+    else:
+        t_hook_effective = t_hook_raw
+
     errors = []
 
     # Determine if AGENTS delegates to SSOT (contains .meta/governed-files.txt reference)
@@ -177,7 +188,7 @@ def check_gov_consistency() -> int:
                 errors.append(f"  AGENTS.md 多出: {extra_in_agents}")
 
     # Check T_hook ⊇ T_ssot
-    missing_in_hook = [t for t in t_ssot if not match_tokens(t, t_hook_raw)]
+    missing_in_hook = [t for t in t_ssot if not match_tokens(t, t_hook_effective)]
     if missing_in_hook:
         errors.append(f"pre-commit GOV_PATTERNS 缺少 (SSOT 有但 hook 无): {missing_in_hook}")
 
