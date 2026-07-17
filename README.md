@@ -15,20 +15,21 @@
 - `DEEPSEEK_API_KEY` → chat completion（summarize.py / inbox_scan.py 等）
 - `ZHIPU_API_KEY` → embedding（embed.py）
 - 两把 key 自备，走目标仓库的 `.env`（见 `templates/env.example`）
+- **DeepSeek 模型选型**：一律用最新版的**次等**模型（当前 `deepseek-v4-flash`；完整策略见 SKILL.md §约束第 3 条）
 
 ---
 
 ## Installation
 
-Installation 仅指 Phase 1a 的机械步骤。Phase 0（体检 + 隐私嗅探 + taxonomy 推断）由技能触发，不是手动安装步骤。
+Installation 仅指 Phase 1a 的机械步骤。Phase 0（体检 + 隐私嗅探 + taxonomy 推断 + 交互式引导）由技能触发，不是手动安装步骤。
 
-### 前置：Phase 0（由技能触发，read-only）
+### 前置：Phase 0（由技能触发，read-only 体检 + 交互式引导）
 
-在目标 Obsidian 仓库触发本技能后，agent 会先跑 Phase 0 体检，产出 `kb-bootstrap-plan.md`（含隐私嗅探结果 + taxonomy 草案 + Phase 建议）。**用户人工审核**后在 plan 顶部把 `phase_0_confirmed: false` 改为 `true`，agent 才进 Phase 1。
+在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + Phase 建议），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 安装范围 / API 配置四个决策点逐个给出选项供选择，选择结果记录进 `kb-bootstrap-plan.md`（执行记录）。全部决策完成即进 Phase 1。
 
 ### Phase 1a（机械安装步骤）
 
-用户确认 Phase 0 后，agent 执行：
+Phase 0 四个决策点全部有结果后，agent 执行：
 
 1. 调用 `init-agent-docs` 铺 docs/ 层级
 2. 拷贝最小脚本集到 `.meta/scripts/`（`common.py` / `maintain-lite.py` / `embed.py` / `summarize.py` / `build_index.py` / `ask.py`）
@@ -36,7 +37,7 @@ Installation 仅指 Phase 1a 的机械步骤。Phase 0（体检 + 隐私嗅探 +
 4. `docs/CONSTITUTION.md` + `docs/TAXONOMY.md` + `AGENTS.md`（`bootstrap_status: in_progress`）
 5. 跑 `python .meta/scripts/sync_agents.py`（生成 CLAUDE.md / GEMINI.md）
 6. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`）并接线：`git config core.hooksPath .githooks`
-7. **完成判定**：`python .meta/scripts/maintain-lite.py --full` 跑通 + 用户在 plan 勾选「会话可用确认」→ agent 把 `bootstrap_status` 改 `completed`
+7. **完成判定**：`python .meta/scripts/maintain-lite.py --full` 跑通 + agent 引导用户试跑一条 ask.py 检索、交互确认质量可接受 → agent 把 `bootstrap_status` 改 `completed`
 
 > Phase 1b / 2 / 3 按需追加，见下方 Phase 概览。
 
@@ -67,7 +68,7 @@ Installation 仅指 Phase 1a 的机械步骤。Phase 0（体检 + 隐私嗅探 +
 
 | Phase | 触发条件 | 装什么 |
 |-------|---------|--------|
-| **0** | 首次触发（read-only 体检） | `kb-bootstrap-plan.md`（隐私嗅探 + taxonomy 草案 + Phase 建议） |
+| **0** | 首次触发（read-only 体检 + 交互引导） | 分步决策引导（隐私 / taxonomy / 安装范围 / API），决策记录进 `kb-bootstrap-plan.md` |
 | **1a** | `notes<30` | 最小自维护骨架（maintain-lite + embed/summarize/index/ask + AGENTS.md + pre-commit） |
 | **1b** | `30≤notes≤200` 追加 | health_report + graph + inbox_scan + whoami + changelog_append 等 |
 | **2** | `notes>200 OR orphan_ratio>0.3` | 自沉淀（memory 结构 + dream + semantic_lint + synthesize + 换回完整 maintain.py） |
@@ -81,6 +82,7 @@ Installation 仅指 Phase 1a 的机械步骤。Phase 0（体检 + 隐私嗅探 +
 
 - v0.2 移除了 bundle 内的 `skill-sync-check.py`（自重 ≥ 承重：仅服务作者一人，手动 diff 一行命令等价替代）。
 - 维护者检测 drift：`diff -r ~/.agents/skills/init-kb-harness/scripts/ <源仓库>/.meta/scripts/`（源仓库 = 作者的 vault，或 forker 的上游 fork）。
+- DeepSeek 发布新代模型时，同步升级 `templates/env.example` 与 `scripts/common.py` 的默认型号为该代次等型号（策略见 SKILL.md §约束第 3 条）。
 
 ---
 

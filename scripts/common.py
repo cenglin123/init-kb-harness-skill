@@ -191,6 +191,7 @@ class DeepSeekClient:
     def __init__(self):
         self.key = ENV.get('DEEPSEEK_API_KEY')
         self.base = ENV.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com/v1')
+        # 默认型号取最新代 DeepSeek 次等型号（批量任务成本控制；新代发布时随之升级）
         self.model = ENV.get('DEEPSEEK_MODEL', 'deepseek-v4-flash')
         self.rate_ms = int(ENV.get('API_RATE_LIMIT_MS', '200'))
         if not self.key:

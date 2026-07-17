@@ -43,17 +43,25 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 ## 执行流程
 
-### Phase 0 · 体检（read-only，必跑）
+### Phase 0 · 体检 + 交互式引导（read-only，必跑）
 
-**不动手，先诊断。** 产出 `kb-bootstrap-plan.md` 到目标仓库根。
+**不动手，先诊断；随后一步一步引导用户做决策。**
 
 1. **规模/结构扫描**：笔记数、目录树、git 状态
-2. **隐私嗅探**：按 `refs/privacy-scan.patterns`（中英双覆盖 + 凭据 glob + 高熵串）扫描，结果写入 plan 供用户人审。**生成 `.meta/rules/category-privacy.md`**（来自 `templates/category-privacy.md`，嗅探结果填入 `## 隐私目录` 段——必须裸目录名列表项，对齐 `_load_privacy_dirs()` 消费契约）。散落敏感文件（不在隐私目录）建议**移入隐私子目录**后纳入保护——当前机制仅目录级生效，散落文件不自动排除
-3. **taxonomy 推断**：用 `refs/taxonomy-inference.prompt`（LLM 主推断 + 规则后置兜底）提议分类，写入 `docs/TAXONOMY.md`（draft，待用户确认）
-4. **成熟度判定**：按 `refs/maturity-rubric.md`（全量化机械可判）建议装到哪个 Phase
-5. **输出 plan**：含嗅探结果 + taxonomy 草案 + Phase 建议 + 用户确认栏
+2. **隐私嗅探**：按 `refs/privacy-scan.patterns`（中英双覆盖 + 凭据 glob + 高熵串）扫描，结果带到下方决策点 ① 供用户人审。**生成 `.meta/rules/category-privacy.md`**（来自 `templates/category-privacy.md`，用户确认后的隐私目录填入 `## 隐私目录` 段——必须裸目录名列表项，对齐 `_load_privacy_dirs()` 消费契约）。散落敏感文件（不在隐私目录）建议**移入隐私子目录**后纳入保护——当前机制仅目录级生效，散落文件不自动排除
+3. **taxonomy 推断**：用 `refs/taxonomy-inference.prompt`（LLM 主推断 + 规则后置兜底）提议分类，写入 `docs/TAXONOMY.md`（draft，决策点 ② 由用户定夺）
+4. **成熟度判定**：按 `refs/maturity-rubric.md`（全量化机械可判）得出 Phase 建议
+5. **分步引导用户决策（核心）**：扫描完成后，按下方决策点**逐个**向用户提问——每点给出**具体选项**让用户在上下文里即时决策，每步有记录、可中断可续。优先用 harness 的交互提问机制（opencode `question` 工具 / Claude Code AskUserQuestion）；无交互机制时退化为在对话中列出编号选项请用户回复序号。**一次只问一个决策点**，等用户回答后再进下一个：
 
-**强制暂停**：Phase 0 完成后向用户呈现 `kb-bootstrap-plan.md`，在 plan 顶部写入字段 `phase_0_confirmed: false`。**只有当用户勾选为 `phase_0_confirmed: true` 后才进 Phase 1**。重复触发时读此字段判断是否已确认。
+   | 步骤 | 决策点 | 呈现内容 | 选项 |
+   |------|--------|---------|------|
+   | ① | 隐私目录 | 嗅探命中文件清单 + 建议隐私目录 | a) 全部纳入 b) 仅部分（用户点名）c) 都不纳入；散落文件追加一问：移入隐私子目录 / 保持现状仅记录 |
+   | ② | taxonomy | TAXONOMY.md 草案要点 | a) 接受 b) 用户口述调整、agent 改后再示 c) 留 draft 以后再定 |
+   | ③ | 安装范围 | rubric 信号值 + Phase 建议 | a) 按建议安装 b) 仅 Phase 1a c) 用户自选组合 |
+   | ④ | API 配置 | env 字段清单（必填：DeepSeek/智谱 key；可选：PRIMARY_HOST） | a) 现在提供（贴入对话或用户自行编辑 .env）b) 稍后自填（骨架照装，LLM 步骤暂不可跑） |
+
+   每步的用户选择**记录进 `kb-bootstrap-plan.md`**（定位：**执行记录**——记下每步选项、选择结果、日期）。
+6. **四个决策点全部有结果 → 直接进入 Phase 1**。中断后重触发时读 plan 中的决策记录，问用户"沿用历史决策 / 重新决策"。
 
 ### Phase 1 · 自维持骨架（Foundation · 拆 1a/1b）
 
@@ -68,6 +76,8 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 - 跑 `python .meta/scripts/sync_agents.py`（生成 CLAUDE.md/GEMINI.md）
 - 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）。
 
+> **安装中的交互引导**：Phase 1 机械步骤遇前置缺失（无 Python / 无 Git Bash / API key 未填）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑）c) 中止，处理后再续。选择记录进 `kb-bootstrap-plan.md`。
+
 #### Phase 1b（`30≤notes≤200` 追加）
 
 补：`health_report.py`（阈值已参数化）+ `build_graph.py` + `inbox_scan.py`（prompt 已去特定仓库示例）+ `check_sidecar_sources.py` + `detect_renames.py` + `whoami.py` + `changelog_append.py`
@@ -76,7 +86,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 1. `python .meta/scripts/maintain-lite.py --full` 成功（embed + summarize + index + 可选 graph/health 全跑通）
 2. `health-report.md` 生成（1b）或 `build_index` 产出（1a）
-3. **人审门**：用户在 `kb-bootstrap-plan.md` 勾选 `[x] 会话可用确认`（判据：已用 ask.py 成功检索到 ≥1 条相关结果，且用户主观确认检索质量可接受）
+3. **人审门（交互式）**：agent 引导用户用 ask.py 跑一条真实问题检索，然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
 4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`，填 `bootstrap_completed_at: <date>`，**重跑 `sync_agents.py`**（任何 AGENTS.md 改动都必须重跑，否则三文件 MD5 漂移、pre-commit hook 拦死后续 commit）
 
 > **诚实标注**：maturity-rubric 的 Phase 解锁判定全部机械可判；bootstrap 完成判定含一次人审门（用户确认检索质量）——两者故意不同，前者决定装多少、后者决定体系是否就绪。
@@ -139,6 +149,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 - `bootstrap_status: in_progress` + `bootstrap_phase` 标识中断处（如读到 `1a` → 补装到 `1a+1b`；读到 `1a+1b` 且 notes>200 → 建议 Phase 2）
 - `bootstrap_status: completed` → 提示"harness 已装（phase=<值>），是否升级 Phase？"
 - 无 `bootstrap_status` 字段（首次） → 从 Phase 0 开始
+- 已存在 `kb-bootstrap-plan.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
 
 ---
 
@@ -158,7 +169,7 @@ target-vault/
 │   └── rules/
 │       ├── category-privacy.md               ← Phase 0 嗅探结果（模板：templates/category-privacy.md）
 │       └── retrieval.md                      ← ask.py 优先
-└── kb-bootstrap-plan.md                      ← Phase 0 产出（保留作执行记录）
+└── kb-bootstrap-plan.md                      ← Phase 0 决策记录（交互引导各步的选择与结果）
 ```
 
 ---
@@ -167,7 +178,7 @@ target-vault/
 
 1. **不健全仓库与 harness 的矛盾**：`notes<10` 时提示"自重可能超内容，建议先攒内容"；Phase 1a 是最小缓解，非消除。
 2. **单用户单机假设**：本 harness 默认单机模型。多用户/多机仓库的主从边界、治理需 Phase 3 重新评估。
-3. **API 后端**：Phase 1 默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。
+3. **API 后端**：Phase 1 默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算；DeepSeek 发布新代时升级为该代次等型号，并同步 `templates/env.example` 与 `common.py` 默认值。
 4. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
 
 ---
@@ -175,6 +186,6 @@ target-vault/
 ## 触发后的第一步
 
 收到触发指令后，**先读**：
-1. 目标仓库根是否有 `.meta/scripts/`（已装？）
+1. 目标仓库根是否有 `.meta/scripts/`（已装？）、是否有 `kb-bootstrap-plan.md`（历史决策记录？）
 2. `refs/maturity-rubric.md` + `refs/privacy-scan.patterns` + `refs/taxonomy-inference.prompt`
-3. 然后从 Phase 0 开始。
+3. 然后从 Phase 0 开始（扫描 → 分步交互引导用户决策）。

@@ -1,7 +1,7 @@
 # Privacy Scan Patterns · Phase 0 隐私嗅探最小集
 
 > R7：中英双覆盖 + 凭据文件名 glob + 高熵串启发式。
-> 召回优先（漏嗅探 = 隐私保护失效）；误报由用户在 kb-bootstrap-plan.md 人审排除。
+> 召回优先（漏嗅探 = 隐私保护失效）；误报由用户在交互决策点排除（选择记录进 kb-bootstrap-plan.md）。
 
 ## 文件名 glob（大小写不敏感）
 
@@ -68,7 +68,7 @@ AIza[0-9A-Za-z\-_]{35}           # Google API key
 **扫描**：仓库根下所有文件（含隐藏，除下方排除）。
 **排除**：`.git/` `.obsidian/` `node_modules/` `__pycache__/` `.venv/` `venv/` 以及 `.meta/`（脚本自身）。
 
-## 嗅探结果去向（写入 kb-bootstrap-plan.md 供人审 + 生成 .meta/rules/category-privacy.md）
+## 嗅探结果去向（决策点 ① 呈现 + 生成 .meta/rules/category-privacy.md + 决策记录进 kb-bootstrap-plan.md）
 
 **category-privacy.md 生成契约**（对齐 common.py `_load_privacy_dirs()` 消费端）：
 - `## 隐私目录` 段下，每行一个**裸目录名**列表项：`- 000【备忘录-账号密码】`
@@ -76,7 +76,7 @@ AIza[0-9A-Za-z\-_]{35}           # Google API key
 - 散落敏感文件（含路径）放 `## 受保护文件` 段（仅人审，机制不自动排除）
 - 完整模板见 `templates/category-privacy.md`
 
-同时写入 `kb-bootstrap-plan.md` 的"隐私嗅探结果"段供人审：
+在**隐私目录决策点**把以下结果呈现给用户（选项见 SKILL.md §Phase 0 决策表），用户选择回填记录进 `kb-bootstrap-plan.md` 的"隐私嗅探结果"段：
 
 ```markdown
 ## 隐私嗅探结果
@@ -94,7 +94,7 @@ AIza[0-9A-Za-z\-_]{35}           # Google API key
 - `path/to/standalone-secret.md` — 命中模式：`*token*`
 - ...
 
-**用户确认**：[ ] 全部纳入 / [ ] 仅 ______ / [ ] 都不纳入
+**用户选择**（交互确认后回填）：全部纳入 / 仅 ______ / 都不纳入；散落文件：移入 / 保持现状
 ```
 
 ## 召回率自检（完工验证）

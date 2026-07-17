@@ -64,4 +64,4 @@
 
 ## 输出去向
 
-推断结果写入目标仓库 `docs/TAXONOMY.md`，**标记为 draft、待用户确认**（Phase 0 不替用户定分类）。
+推断结果写入目标仓库 `docs/TAXONOMY.md`，**标记为 draft**（Phase 0 不替用户定分类；由 SKILL.md §Phase 0 决策表决策点 ② 交互定夺）。

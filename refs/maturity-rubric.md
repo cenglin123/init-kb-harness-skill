@@ -33,7 +33,7 @@ IF has_governance_docs:
     → 提示："检测到既有治理文档，Phase 3 安装前需核对边界，避免覆盖"
 ```
 
-## 输出格式（写入 kb-bootstrap-plan.md）
+## 输出格式（呈现于安装范围决策点 + 记录进 kb-bootstrap-plan.md）
 
 ```markdown
 ## Phase 建议
@@ -45,11 +45,11 @@ IF has_governance_docs:
 
 **建议安装**: Phase 1a [+ 1b] [+ 2] [+ 3]
 **理由**: <命中规则的一句话>
-**用户确认**: [ ] 同意 / [ ] 调整为 ______
+**用户选择**（交互确认后回填）: 按建议安装 / 仅 Phase 1a / 自选组合 ______
 ```
 
 ## 边界诚实
 
 - `notes_count < 10`：提示"极小仓库，bootstrap harness 的自重可能超过内容本身，建议先攒内容"
 - 信号冲突（如 notes>200 但 has_host_field=0）：按更高 Phase 建议（保守追加，用户可裁减）
-- 判定结果**总是建议、非强制**——最终由用户在 kb-bootstrap-plan.md 勾选确认
+- 判定结果**总是建议、非强制**——最终由用户在交互决策点中选择（选项见 SKILL.md §Phase 0 决策表），选择结果记录进 kb-bootstrap-plan.md
