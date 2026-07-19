@@ -43,7 +43,7 @@
 
 > 前三型覆盖 Agent 自动产物；第四型覆盖用户与 Agent 共同维护的文件。需要跨维护周期存活的内容必须放在持久型文件中。
 
-**持久型文件清单（权威列表）**：`AGENTS.md` / `docs/CONSTITUTION.md` / `docs/TAXONOMY.md` / `docs/CHANGELOG.md` / `docs/plans/` / `.meta/docs/` / `.meta/rules/` / `.meta/memory/`
+**持久型文件清单（权威列表）**：`AGENTS.md` / `docs/CONSTITUTION.md` / `docs/TAXONOMY.md` / `docs/CHANGELOG.md` / `docs/plans/` / `.meta/rules/` / `.meta/memory/` / `.meta/converge/`（仓库自行新增的持久目录按此型对待）
 
 ---
 
@@ -54,7 +54,7 @@
 治理体系下事务按**门控轴**切分，轴集合开放可扩展。当前 3 条：
 
 **①编辑门控轴**（按"改动触发的审批强度"）
-- **治理文档**（对 Agent 行为有规范性约束力）→ 改动需多 agent 评议
+- **治理文档**（对 Agent 行为有规范性约束力；机械边界 = `.meta/governed-files.txt`）→ 改动走 ultraverge（≥3 独立 reviewer、≥2 lineage、≥1 fresh-context）
 - **持久型文件**（手动维护、不可重建）→ 改动需人工审议
 
 **②从机访问轴**（按"哪台 host 可写"）
@@ -63,7 +63,9 @@
 **③隐私读轴**（按"内容敏感度限制读取"）
 - **隐私目录**（Phase 0 嗅探 + category-privacy.md）→ 禁 Read/Grep
 
-> 消歧：「治理体系」指受门控的文件/门控轴集合；区别于 converge/deliberate/audit 判断动作模块（若安装）。
+**计划质量控制**采用同一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后 done`。执行前收敛由 converge SKILL 承担（`.meta/converge/README.md` 绑定本地路径），执行后验收由 fresh verifier 承担，证据写入 plan——不设 deliberations / audit 独立目录。
+
+> 消歧：「治理体系」指受门控的文件/门控轴集合；区别于 converge 判断动作模块（执行前收敛 + 执行后 fresh review 的单一生命周期）。
 
 ---
 

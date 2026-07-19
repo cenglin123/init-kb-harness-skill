@@ -13,7 +13,10 @@ from datetime import datetime
 from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, scan_notes, rel_path, meta_mirror
+from common import (
+    VAULT_ROOT, scan_notes, rel_path, meta_mirror,
+    scan_office_docs, OFFICE_EXTRACTS_DIR,
+)
 
 INDEX_DIR = VAULT_ROOT / '.index'
 MANIFEST_DIR = INDEX_DIR / 'manifest'
@@ -60,6 +63,29 @@ def collect_entries():
             'title': extract_title(content),
             'lines': len(content.splitlines()),
             'chars': len(content),
+        })
+
+    # office 文档：按源文件登记；摘要/行数取自 extract sidecar（若已提取）
+    for doc in scan_office_docs():
+        rel = rel_path(doc)
+        extract = OFFICE_EXTRACTS_DIR / (rel + '.md')
+        lines = chars = 0
+        if extract.exists():
+            try:
+                text = extract.read_text(encoding='utf-8')
+                lines, chars = len(text.splitlines()), len(text)
+            except Exception:
+                pass
+        entries.append({
+            'path': rel,
+            'filename': doc.name,
+            'category': get_category(rel),
+            'date': extract_date(doc.name),
+            'title': doc.stem,
+            'lines': lines,
+            'chars': chars,
+            'doc_type': 'office',
+            'summary_key': rel_path(extract) if extract.exists() else '',
         })
     return entries
 
@@ -145,9 +171,15 @@ def build_manifest_category(cat: str, entries) -> str:
         "|------|------|-----:|------|",
     ]
     for e in sorted(entries, key=lambda x: (x['date'], x['filename']), reverse=True):
-        s = load_summary(e['path']).replace('\n', ' ')[:100]
+        if e.get('doc_type') == 'office':
+            s = (load_summary(e['summary_key']).replace('\n', ' ')[:100]
+                 if e.get('summary_key') else '（未提取）')
+            name = f"📎 {e['filename']}"
+        else:
+            s = load_summary(e['path']).replace('\n', ' ')[:100]
+            name = e['filename']
         s = s or '—'
-        lines.append(f"| {e['date']} | `{e['filename']}` | {e['lines']} | {s} |")
+        lines.append(f"| {e['date']} | `{name}` | {e['lines']} | {s} |")
     lines.append("")
     return "\n".join(lines)
 
@@ -155,7 +187,7 @@ def build_manifest_category(cat: str, entries) -> str:
 def build_topics(entries) -> str:
     tag_files = defaultdict(list)
     for e in entries:
-        for tag in load_tags(e['path']):
+        for tag in load_tags(e.get('summary_key') or e['path']):
             tag_files[tag].append(e)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")

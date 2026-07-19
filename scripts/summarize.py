@@ -12,6 +12,7 @@ import sys
 import re
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
@@ -20,9 +21,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
-    VAULT_ROOT, scan_notes, content_hash, rel_path,
+    VAULT_ROOT, scan_notes, scan_office_extracts, content_hash, rel_path,
     meta_mirror, ensure_parent, DeepSeekClient,
-    find_all_wikilinks, find_all_mdlinks,
+    find_all_wikilinks, find_all_mdlinks, MAINTAIN_CONCURRENCY,
 )
 from embed import blob_to_embedding
 
@@ -86,9 +87,14 @@ def cosine(a, b) -> float:
 
 
 def load_avg_embeddings(db) -> dict:
-    """每个文件所有 chunk 的平均向量"""
+    """每个文件所有 chunk 的平均向量。表尚未建成（首跑与 embed 并行）时返回空。"""
     by_path = {}
-    for row in db.execute("SELECT path, embedding FROM embeddings"):
+    try:
+        rows = db.execute("SELECT path, embedding FROM embeddings")
+    except sqlite3.OperationalError as e:
+        print(f"  [warn] embeddings 表暂不可读（{e}），本轮跳过关联计算")
+        return {}
+    for row in rows:
         path, blob = row
         vec = np.array(blob_to_embedding(blob))
         by_path.setdefault(path, []).append(vec)
@@ -194,36 +200,47 @@ def already_up_to_date(sidecar: Path, h: str) -> bool:
 
 def main(full=False):
     db = sqlite3.connect(str(DB_PATH))
-    client = DeepSeekClient()
+    db.execute("PRAGMA busy_timeout=30000")
+    try:
+        client = DeepSeekClient()
+    except RuntimeError as e:
+        print(f"  ✗ {e}——请在 .env 配置后重跑维护")
+        db.close()
+        return 1
     vocab = load_vocab()
 
+    # office 提取 sidecar 与普通笔记同等处理。其 summaries/tags/links 镜像会落在
+    # .meta/summaries/.meta/office-extracts/... —— 嵌套是有意的：写读两侧统一走
+    # meta_mirror，且与 check_sidecar_sources 的 source 契约（镜像相对路径）一致。
     notes = []
-    for md in scan_notes():
+    for md in list(scan_notes()) + list(scan_office_extracts()):
         rel = rel_path(md)
         h = content_hash(md)
         notes.append((md, rel, h))
-    print(f"  共 {len(notes)} 篇笔记")
+    print(f"  共 {len(notes)} 篇笔记（含 office 提取）")
 
-    # 第一轮：摘要 + tag（合并为一次 API 调用）
-    print("  ── 生成摘要 + tag ──")
-    for i, (md, rel, h) in enumerate(notes, 1):
+    # 第一轮：摘要 + tag（合并为一次 API 调用；跨文件并发）
+    pending = []
+    for md, rel, h in notes:
         summary_file = meta_mirror(md, 'summaries')
         if not full and already_up_to_date(summary_file, h):
             continue
-
         try:
             content = md.read_text(encoding='utf-8')
         except Exception as e:
             print(f"    [skip] {rel}: {e}")
             continue
+        pending.append((rel, h, content))
 
+    print(f"  ── 生成摘要 + tag（{len(pending)} 篇 · 并发 {MAINTAIN_CONCURRENCY}）──")
+    # vocab 在本轮开始时取快照供 prompt 使用；计数更新回主线程串行执行
+    top_vocab = sorted(vocab.items(), key=lambda x: -x[1])[:30]
+    vocab_str = " ".join(f"#{t}" for t, _ in top_vocab) or "(空)"
+
+    def _summarize_one(item):
+        rel, h, content = item
         preview = content[:2000]
-        print(f"  [{i}/{len(notes)}] {rel}")
-
         user_tags = extract_user_tags(content)
-        top_vocab = sorted(vocab.items(), key=lambda x: -x[1])[:30]
-        vocab_str = " ".join(f"#{t}" for t, _ in top_vocab) or "(空)"
-
         summary = "(摘要生成失败)"
         agent_tags = []
         try:
@@ -240,13 +257,20 @@ def main(full=False):
             if not sm and not tm:
                 summary = raw.strip()[:200]
         except Exception as e:
-            print(f"    摘要+tag: {e}")
+            print(f"    摘要+tag {rel}: {e}")
+        return rel, h, summary, agent_tags, user_tags
 
-        for t in agent_tags + user_tags:
-            vocab[t] = vocab.get(t, 0) + 1
-
-        write_summary(rel, h, summary, client.model)
-        write_tags(rel, h, user_tags, agent_tags, client.model)
+    done = 0
+    with ThreadPoolExecutor(max_workers=MAINTAIN_CONCURRENCY) as pool:
+        futures = {pool.submit(_summarize_one, it): it[0] for it in pending}
+        for fut in as_completed(futures):
+            done += 1
+            rel, h, summary, agent_tags, user_tags = fut.result()
+            print(f"  [{done}/{len(pending)}] {rel}")
+            for t in agent_tags + user_tags:
+                vocab[t] = vocab.get(t, 0) + 1
+            write_summary(rel, h, summary, client.model)
+            write_tags(rel, h, user_tags, agent_tags, client.model)
 
     save_vocab(vocab)
 

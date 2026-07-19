@@ -16,15 +16,24 @@ commit 模板或 UI 文案中的"Claude"字样不代表实际模型——准确�
 Provider 识别分两层：
   Layer 1 · Harness 路由（detect_harness）：
     优先级（强 → 弱）：
-      1. OPENCODE_BIN_PATH env → 'opencode'
-      2. 任何 ANTHROPIC_* env 存在 → 'claude-code'
-      3. cc-switch.db 存在 或 ~/.claude/settings.json 存在 → 'claude-code'（弱信号）
-      4. 兜底 → 'unknown'（按 Claude Code 流程处理）
-    设计：opencode 命中后**独占**——不再读 cc-switch / .claude / ANTHROPIC_* env，
-         避免 Claude Code 残留状态在 opencode 会话内假阳性（实测：cc-switch.db 残留
-         会导致 opencode 会话被误判为 deepseek-v4-pro[1M]）。
+      1. CODEX_THREAD_ID env → 'codex'（Codex 当前线程专有运行时信号）
+      2. CLAUDECODE=1 env → 'claude-code'（Claude Code 运行时专有信号）
+      3. OPENCODE_BIN_PATH env → 'opencode'
+      4. cc-switch.db 存在 或 ~/.claude/settings.json 存在 → 'claude-code'（弱信号）
+      5. 兜底 → 'unknown'（按 Claude Code 流程处理）
+    设计：CODEX_THREAD_ID / CLAUDECODE=1 是当前 harness 注入的专有运行时信号，
+         优先于可能从父 shell 残留的 OPENCODE_BIN_PATH。ANTHROPIC_* env 不作为
+         harness 检测信号——可能从 shell
+         profile/.env 泄漏到 opencode 子进程造成假阳性（详见 detect_harness() 设计说明）。
+         opencode 命中后**独占**——一旦判定为 opencode，main() 不再读 cc-switch /
+         .claude/settings.json / ANTHROPIC_* env，避免 Claude Code 残留状态在 opencode
+         会话内假阳性（实测：cc-switch.db 残留会导致 opencode 会话被误判为
+         deepseek-v4-pro[1M]）。
 
   Layer 2 · 各 harness 内部 Provider 识别：
+    codex：
+      - provider 固定报告为 OpenAI / Codex；当前进程环境未暴露精确模型 ID，
+        因而只输出稳定身份 `openai/codex`，不从其他 harness 状态猜测模型。
     claude-code（原逻辑，高 → 低）：
       1. 显式 BASE_URL（env 或 settings）→ 按 URL 匹配（字节实际流向，最强信号）
       2. cc-switch 激活 provider（~/.cc-switch/cc-switch.db 中 app_type=claude & is_current=1）
@@ -58,6 +67,8 @@ import json
 import os
 import re
 import sqlite3
+import sys
+import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -242,17 +253,21 @@ def detect_harness() -> str:
     """识别当前运行的 harness 框架。
 
     优先级（强 → 弱）：
-      1. CLAUDECODE=1 env → 'claude-code'（Claude Code 运行时专有信号）
-      2. OPENCODE_BIN_PATH env 存在 → 'opencode'
-      3. cc-switch.db 存在 或 ~/.claude/settings.json 存在 → 'claude-code'（弱信号）
-      4. 兜底 → 'unknown'
+      1. CODEX_THREAD_ID env → 'codex'（Codex 当前线程专有运行时信号）
+      2. CLAUDECODE=1 env → 'claude-code'（Claude Code 运行时专有信号）
+      3. OPENCODE_BIN_PATH env 存在 → 'opencode'
+      4. cc-switch.db 存在 或 ~/.claude/settings.json 存在 → 'claude-code'（弱信号）
+      5. 兜底 → 'unknown'
 
-    设计：CLAUDECODE=1 是 Claude Code harness 自身设置的布尔标识，opencode/Codex/
-    Cursor 等绝不设置此变量。ANTHROPIC_* 环境变量不作为 harness 检测信号——它们可能
-    从 shell profile /.env 泄漏到 opencode 子进程，造成假阳性。
+    设计：CODEX_THREAD_ID / CLAUDECODE=1 是当前 harness 的专有运行时信号，优先于
+    可能从父 shell 泄漏的 OPENCODE_BIN_PATH。ANTHROPIC_* 环境变量不作为 harness
+    检测信号——它们可能从 shell profile /.env 泄漏到 opencode 子进程，造成假阳性。
     opencode 命中后**独占**——一旦判定为 opencode，main() 不再读 cc-switch /
     .claude/settings.json / ANTHROPIC_* env。
     """
+    # Codex 当前线程专有信号；优先于可能残留的 OPENCODE_BIN_PATH。
+    if os.environ.get('CODEX_THREAD_ID', '').strip():
+        return 'codex'
     # Claude Code 专有运行时信号
     if os.environ.get('CLAUDECODE', '').strip() == '1':
         return 'claude-code'
@@ -266,17 +281,118 @@ def detect_harness() -> str:
     return 'unknown'
 
 
+def _normalize_dir(p: str) -> str:
+    """把目录路径归一化为可比较的形式（POSIX + 小写）。
+
+    背景问题（S2）：session.directory 列存储正斜杠 POSIX 路径（如
+    `C:/path/to/vault`），而 Windows 上 `os.getcwd()` 返回反斜杠
+    （`C:\\path\\to\\vault`）。直接字符串比较会失配，导致正向定位漏判。
+
+    采用字符串级归一化（非 `Path.resolve`）以保持纯函数性质——无文件系统访问、
+    无符号链接解析、确定性。Windows 路径大小写不敏感，故 lower。
+    """
+    if not p:
+        return ''
+    return p.replace('\\', '/').lower()
+
+
+def select_session_model(
+    rows: list[dict],
+    cwd: str,
+    now_ms: int,
+    window_ms: int = 120000,
+) -> tuple[Optional[str], bool, str]:
+    """从 session 表的原始行中选择"调用者本会话"的 model。
+
+    **纯函数**——无 IO，确定性，便于单测。
+
+    检测阶梯（honest best-effort，**非正向鉴定**）：
+
+      1. directory 过滤：保留 directory == cwd 的行（跨目录并发隔离——
+         这是**可靠正向定位的部分**，消除跨项目并发污染）。
+      2. 活跃窗口筛选：在同目录行中保留 `now_ms - time_updated <= window_ms`
+         的"近期活跃"行。`window_ms` 默认 120000（2min），偏向"宁可过宽误降级
+         也不漏检调用者"——过宽只会多降级（安全方向），过窄才会误判。
+      3. 判定：
+         - 恰好 **1** 行近期活跃 → **正向定位**：返回该行 model，
+           `degraded=False`（单会话常态 + 跨目录并发下调用者是同目录唯一活跃
+           会话均落此分支）。
+         - **≥2** 行近期活跃（同目录并发征兆）→ **无法正向定位**：返回
+           `degraded=True` + 最新行 model 作 best-guess +
+           reason=`"same-dir concurrency"`。
+         - **0** 行近期活跃（whoami 在会话久闲后运行）→ 返回同目录最新行
+           model + `degraded=True` + reason=`"stale, no active session in window"`。
+      4. 无同目录行（cwd 不匹配任何 session）→ 返回 `degraded=True` + 全局最新行
+         best-guess + reason=`"no session in cwd"`；连全局都为空则返回
+         `(None, True, "no session in cwd")`。
+
+    **诚实边界（best-effort 正向定位 + 稳健降级）**：
+
+    本函数的可靠价值是**消除跨目录并发污染**。对**同目录并发**——当本机 vault
+    是用户主工作目录时属常态而非低概率边缘——directory 信号无法消歧，本函数
+    只能**检测到并诚实告警降级**，**不是**正向解出调用者本会话。彻底正向定位
+    同目录并发需上游暴露 session id（如 `OPENCODE_SESSION_ID` env），本地兜底
+    无法替代。
+
+    Args:
+      rows: session 表原始行字典列表，键含 {id, directory, time_updated, model}。
+            `model` 字段被透传（opaque），由调用方解析。
+      cwd: 调用者工作目录（与各行 directory 比较前归一化）。
+      now_ms: 当前时间（毫秒），由调用方传入以保持函数纯度。
+      window_ms: 活跃窗口宽度（毫秒，默认 2 分钟）。
+
+    Returns:
+      `(model | None, degraded: bool, reason: str)`。
+      `model` 是被选中行的 `model` 字段原值；调用方负责 JSON 解析。
+    """
+    cwd_n = _normalize_dir(cwd)
+    # 1. directory 过滤
+    same_dir = [r for r in rows if _normalize_dir(r.get('directory', '')) == cwd_n]
+    if not same_dir:
+        # 4. 无同目录行：回退全局最新行；连全局也空则返回 None
+        if rows:
+            glob_latest = max(rows, key=lambda r: r.get('time_updated', 0))
+            return glob_latest.get('model'), True, 'no session in cwd'
+        return None, True, 'no session in cwd'
+    # 2. 活跃窗口筛选
+    active = [r for r in same_dir if (now_ms - r.get('time_updated', 0)) <= window_ms]
+    # 3. 判定
+    if len(active) == 1:
+        return active[0].get('model'), False, ''
+    if len(active) >= 2:
+        latest = max(active, key=lambda r: r.get('time_updated', 0))
+        return latest.get('model'), True, 'same-dir concurrency'
+    # 0 行近期活跃
+    latest_same = max(same_dir, key=lambda r: r.get('time_updated', 0))
+    return latest_same.get('model'), True, 'stale, no active session in window'
+
+
 def read_opencode_model_from_db() -> Optional[dict]:
     """从 opencode.db session 表读取当前会话实际使用的模型（权威源）。
 
-    数据源：~/.local/share/opencode/opencode.db 的 session 表，取 time_updated
-    最新一行的 model 列（JSON: {"id":..., "providerID":..., "variant":...}）。
+    数据源：~/.local/share/opencode/opencode.db 的 session 表。
+
+    定位逻辑（修复 2026-07-05 并发竞态）：原实现取 `ORDER BY time_updated DESC
+    LIMIT 1`——即**全局最新行**。多 opencode 会话并发时，任一会话的 time_updated
+    更新都会抢占"最新行"，导致跨目录/同目录并发下抓到错误会话。
+
+    现实现把读到的所有相关行（id, directory, time_updated, model）喂给纯函数
+    `select_session_model(rows, cwd, now_ms, window_ms)`，由它按 directory 过滤 +
+    活跃窗口 + 并发检测的阶梯选定调用者本会话的 model，并给出 degraded/reason
+    信号。详见 `select_session_model` docstring 的诚实边界声明——可靠价值是
+    **消除跨目录并发污染**；同目录并发只能 best-effort 检测并降级告警，**不是**
+    正向解出调用者本会话。
+
+    返回字典结构：
+      {'provider_id': str, 'model_id': str,
+       'degraded': bool, 'reason': str}
+    `degraded=True` 时 `reason` 标注降级原因（"same-dir concurrency" /
+    "stale, no active session in window" / "no session in cwd"）。
 
     为什么这是权威源：session.model 是 opencode 运行时为每个会话记录的实际模型，
     随会话切换实时更新。相比之下，model.json 的 recent 数组是去重的导航历史，
     切回已存在模型时不会重排到 [0]，导致 recent[0] ≠ 当前模型（2026-06-29 实测误报）。
 
-    返回 {'provider_id': str, 'model_id': str} 或 None。
     DB 缺失/加锁/schema 不符/无 session 行时静默返回 None。
     """
     db_path = OPENCODE_SHARE_DIR / 'opencode.db'
@@ -285,19 +401,28 @@ def read_opencode_model_from_db() -> Optional[dict]:
     try:
         con = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=1.0)
         try:
-            row = con.execute(
-                'SELECT model FROM session '
+            rows_raw = con.execute(
+                'SELECT id, directory, time_updated, model FROM session '
                 'WHERE model IS NOT NULL AND model != "" '
-                'ORDER BY time_updated DESC LIMIT 1'
-            ).fetchone()
+                'ORDER BY time_updated DESC'
+            ).fetchall()
         finally:
             con.close()
     except Exception:
         return None
-    if not row or not row[0]:
+    if not rows_raw:
+        return None
+    rows = [
+        {'id': r[0], 'directory': r[1] or '', 'time_updated': r[2] or 0, 'model': r[3]}
+        for r in rows_raw
+    ]
+    model_str, degraded, reason = select_session_model(
+        rows, os.getcwd(), int(time.time() * 1000)
+    )
+    if not model_str:
         return None
     try:
-        data = json.loads(row[0])
+        data = json.loads(model_str)
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -307,7 +432,12 @@ def read_opencode_model_from_db() -> Optional[dict]:
     mid = str(data.get('id', '')).strip()
     if not pid or not mid:
         return None
-    return {'provider_id': pid, 'model_id': mid}
+    return {
+        'provider_id': pid,
+        'model_id': mid,
+        'degraded': degraded,
+        'reason': reason,
+    }
 
 
 def read_opencode_model_state() -> Optional[dict]:
@@ -322,12 +452,14 @@ def read_opencode_model_state() -> Optional[dict]:
     注意：model.json 的 recent[0] 曾是唯一数据源，但实测发现它是去重导航历史，
     切回已存在模型时不重排，导致 recent[0] ≠ 当前模型。已降级为兜底。
     """
-    # 权威源：opencode.db
+    # 权威源：opencode.db（含 directory 过滤 + 并发检测的 degraded 信号）
     state = read_opencode_model_from_db()
     if state:
         return state
 
     # 兜底：model.json recent[0]（旧逻辑，DB 不可用时使用）
+    # 已知可靠性缺口：recent 是去重导航历史，切回已存在模型时不重排到 [0]，
+    # 可能 ≠ 当前模型——标记 degraded=True 诚实告警。
     path = OPENCODE_STATE_DIR / 'model.json'
     if not path.exists():
         return None
@@ -347,7 +479,12 @@ def read_opencode_model_state() -> Optional[dict]:
     mid = str(first.get('modelID', '')).strip()
     if not pid or not mid:
         return None
-    return {'provider_id': pid, 'model_id': mid}
+    return {
+        'provider_id': pid,
+        'model_id': mid,
+        'degraded': True,
+        'reason': 'model.json fallback (DB unavailable; recent[0] may be stale)',
+    }
 
 
 def read_opencode_provider_config() -> dict:
@@ -532,12 +669,18 @@ def output_frontmatter(
 
     主机输出 model + generated_at；从机额外输出 host（host 字段存在 = 从机创作）。
     model 字段存在即标识 agent 创作（人写笔记不应设 model 字段）。
+
+    降级语义（来自 opencode 路径的并发/陈旧检测）：当 opencode_state['degraded']
+    为 True 时追加 `confidence: low`，标识 model 可能受同目录并发/陈旧会话污染。
+    非降级分支输出不变（无 confidence 行，与单会话旧行为一致）。
     """
     from datetime import datetime, timezone
+    degraded = False
     if opencode_state:
         pid = (opencode_state.get('provider_id') or '').strip()
         mid = (opencode_state.get('model_id') or '').strip()
         model = f'{pid}/{mid}' if pid and mid else 'unknown'
+        degraded = bool(opencode_state.get('degraded', False))
     else:
         model_field = (cfg or {}).get('model', FieldSource('unknown', ''))
         base_url = (cfg or {}).get('base_url', FieldSource('', '')).value
@@ -559,6 +702,8 @@ def output_frontmatter(
     if primary_host and actual_host != primary_host:
         print(f'host: {actual_host}')
     print(f'model: {model}')
+    if degraded:
+        print(f'confidence: low')
     print(f'generated_at: {now}')
 
 
@@ -567,12 +712,10 @@ def main() -> int:
 
     # --frontmatter 模式：输出 agent 溯源 YAML 片段
     if '--frontmatter' in sys.argv:
-        if harness == 'opencode':
+        if harness == 'codex':
+            output_frontmatter({'model': FieldSource('openai/codex', 'runtime')})
+        elif harness == 'opencode':
             output_frontmatter(opencode_state=read_opencode_model_state())
-        elif harness == 'unknown':
-            # harness 未识别（非 cc-switch/opencode）：不 fall through 读
-            # ANTHROPIC_*/cc-switch 假装 Claude Code；输出 model: unknown，请人工标注
-            output_frontmatter()
         else:
             cfg = resolve_effective_config()
             output_frontmatter(cfg, read_ccswitch_active('claude'))
@@ -580,6 +723,16 @@ def main() -> int:
 
     print('=== 模型自检 ===')
     print(f'Harness:  {harness}')
+
+    if harness == 'codex':
+        print('Provider: OpenAI / Codex')
+        print('BASE_URL: (由 Codex 宿主管理；当前进程未暴露)')
+        print('MODEL:    openai/codex（稳定 harness 身份；精确模型 ID 未暴露）')
+        print()
+        print('提示：')
+        print('  - Harness 判定依据：CODEX_THREAD_ID env')
+        print('  - 不读取 opencode.db / cc-switch.db / .claude settings 猜测 Codex 模型')
+        return 0
 
     # opencode 分支：不读 ANTHROPIC_* env / .claude / cc-switch（避免 Claude Code 残留假阳性）
     if harness == 'opencode':
@@ -596,10 +749,15 @@ def main() -> int:
         provider_desc, base_url = detect_provider_opencode(state, opencode_cfg)
         pid = state['provider_id']
         mid = state['model_id']
+        degraded = bool(state.get('degraded', False))
+        reason = state.get('reason', '')
         print(f'Provider: {provider_desc}')
         print(f'  └ opencode session.model: providerID={pid}, modelID={mid}')
         print(f'BASE_URL: {base_url or "(内置 provider；未在 opencode.json 中显式声明)"}')
         print(f'MODEL:    {pid}/{mid}')
+        if degraded:
+            print(f'  ⚠ 并发/陈旧会话检测：model 可受同目录并发污染（reason={reason}）；'
+                  f'请核验 session 表或在单一会话时复测')
         if opencode_cfg:
             print('opencode.json 自定义 provider（诊断用）：')
             for pid_key, info in sorted(opencode_cfg.items()):
@@ -615,19 +773,6 @@ def main() -> int:
         print('  - 模型来源：opencode.db session 表最新行（权威，随会话切换实时更新）')
         print('  - 不读 ANTHROPIC_* env / .claude/settings.json / cc-switch.db（避免 Claude Code 残留假阳性）')
         print('  - 内置 provider（zhipuai-coding-plan 等）不在 opencode.json 中，仅 auth.json 有凭据')
-        return 0
-
-    # === unknown 分支：harness 非 cc-switch/opencode ===
-    # detect_harness 兜底为 unknown（非 Claude Code、非 opencode 的公开用户场景）。
-    # 不 fall through 读 ANTHROPIC_*/cc-switch 假装已知 harness——那样会把任意环境里
-    # 残留的 .claude/settings.json 误报为 Claude Code。诚实降级为 unknown，请人工标注。
-    if harness == 'unknown':
-        print('Provider: 未识别（harness 非 cc-switch/opencode）')
-        print()
-        print('提示：')
-        print('  - detect_harness 未识别为 Claude Code 或 opencode')
-        print('  - 不读 ANTHROPIC_* env / .claude / cc-switch（避免假装已知 harness）')
-        print('  - 请人工在 frontmatter 标注 model 字段')
         return 0
 
     # === Claude Code 分支（原逻辑，保持不变） ===
@@ -696,7 +841,6 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent))
     from common import log_script_run

@@ -1,0 +1,14 @@
+# 治理文档清单（机械 SSOT）· 安装到目标仓库 .meta/governed-files.txt
+# 每行一个 glob，pre-commit hook 用 bash case 按行匹配 staged 路径；# 开头为注释。
+# 注意：bash case 的 glob 不支持 ** 递归通配——多级目录请写 dir/*（仅直接子级）
+# 或按需列多行；本文件自身的变更由 hook 特判（SSOT 变更 → ultraverge 提醒）。
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+docs/CONSTITUTION.md
+docs/TAXONOMY.md
+docs/plans/README.md
+.meta/rules/*
+.meta/converge/README.md
+.meta/memory/MEMORY.md
+.githooks/*

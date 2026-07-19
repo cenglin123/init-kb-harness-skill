@@ -131,6 +131,61 @@ def scan_notes() -> Iterator[Path]:
         if not is_excluded(md):
             yield md
 
+# ─── Office 文档提取（sidecar 机制）────────────────────────────────────────
+# 源 office 文件由 extract_office.py 提取纯文本到 .meta/office-extracts/ 镜像
+# sidecar（.md），随后进入 embed / bm25 / build_index 检索链路。
+OFFICE_EXTRACT_EXTS = {
+    e.strip().lower()
+    for e in ENV.get('OFFICE_EXTRACT_EXTS', '.docx,.xlsx,.pptx,.pdf').split(',')
+    if e.strip()
+}
+OFFICE_LEGACY_EXTS = {'.doc', '.xls', '.ppt'}  # 老二进制格式：不提取，登记提示转存
+OFFICE_EXTRACTS_DIR = VAULT_ROOT / '.meta' / 'office-extracts'
+
+# 维护管线批量任务（API 调用/文件提取）的并发数
+MAINTAIN_CONCURRENCY = max(1, int(ENV.get('MAINTAIN_CONCURRENCY', '6')))
+
+
+def scan_office_docs() -> Iterator[Path]:
+    """扫描待提取的 office 源文件（排除目录/隐私目录以外）。"""
+    for f in VAULT_ROOT.rglob('*'):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in OFFICE_EXTRACT_EXTS:
+            continue
+        if not is_excluded(f):
+            yield f
+
+
+def scan_office_legacy_docs() -> Iterator[Path]:
+    """扫描无法提取的老格式 office 文件（.doc/.xls/.ppt），供登记提示。"""
+    for f in VAULT_ROOT.rglob('*'):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in OFFICE_LEGACY_EXTS:
+            continue
+        if not is_excluded(f):
+            yield f
+
+
+def scan_office_extracts() -> Iterator[Path]:
+    """扫描 office 提取 sidecar（`_` 开头的报告文件除外）。"""
+    if not OFFICE_EXTRACTS_DIR.exists():
+        return
+    for md in OFFICE_EXTRACTS_DIR.rglob('*.md'):
+        if md.name.startswith('_'):
+            continue
+        yield md
+
+
+def office_extract_source(extract_rel: str) -> str:
+    """由 sidecar 相对路径推回源 office 文件的 vault 相对路径。
+    '.meta/office-extracts/a/b.xlsx.md' → 'a/b.xlsx'；非 sidecar 路径原样返回。"""
+    prefix = '.meta/office-extracts/'
+    if extract_rel.startswith(prefix) and extract_rel.endswith('.md'):
+        return extract_rel[len(prefix):-3]
+    return extract_rel
+
 def scan_memory_notes() -> Iterator[Path]:
     """扫描活跃 memory 记忆文件，不包含归档层。"""
     memory_root = VAULT_ROOT / '.meta' / 'memory'
@@ -145,9 +200,10 @@ def scan_memory_notes() -> Iterator[Path]:
             yield md
 
 def scan_indexable_notes(scope: str = 'all') -> Iterator[Path]:
-    """扫描可进入 embeddings 的语料：用户笔记、memory 或二者并集。"""
+    """扫描可进入 embeddings 的语料：用户笔记（含 office 提取 sidecar）、memory 或并集。"""
     if scope == 'notes':
         yield from scan_notes()
+        yield from scan_office_extracts()
         return
     if scope == 'memory':
         yield from scan_memory_notes()
@@ -156,7 +212,7 @@ def scan_indexable_notes(scope: str = 'all') -> Iterator[Path]:
         raise ValueError(f"unknown scope: {scope}")
 
     seen = set()
-    for scanner in (scan_notes, scan_memory_notes):
+    for scanner in (scan_notes, scan_office_extracts, scan_memory_notes):
         for md in scanner():
             rel = rel_path(md)
             if rel in seen:
@@ -187,6 +243,27 @@ def ensure_parent(path: Path):
 
 # ─── API 客户端 ────────────────────────────────────────────────────────────
 
+# 跨线程全局限速：ThreadPool 并发时各线程独立 sleep 会把有效速率放大 N 倍，
+# 这里用共享时间戳 + 锁保证进程内请求间隔 ≥ rate_ms
+import threading
+_rate_lock = threading.Lock()
+_rate_last_ts = 0.0
+
+
+def _global_rate_limit(rate_ms: int):
+    global _rate_last_ts
+    if rate_ms <= 0:
+        return
+    interval = rate_ms / 1000
+    with _rate_lock:
+        now = time.monotonic()
+        wait = _rate_last_ts + interval - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _rate_last_ts = now
+
+
 class DeepSeekClient:
     def __init__(self):
         self.key = ENV.get('DEEPSEEK_API_KEY')
@@ -200,6 +277,7 @@ class DeepSeekClient:
     def chat(self, messages, temperature=0.3, max_tokens=512) -> str:
         for attempt in range(3):
             try:
+                _global_rate_limit(self.rate_ms)
                 r = requests.post(
                     f"{self.base}/chat/completions",
                     headers={
@@ -215,7 +293,6 @@ class DeepSeekClient:
                     timeout=60,
                 )
                 r.raise_for_status()
-                time.sleep(self.rate_ms / 1000)
                 return r.json()['choices'][0]['message']['content'].strip()
             except requests.exceptions.RequestException as e:
                 if attempt == 2:
@@ -329,6 +406,7 @@ class ZhipuEmbedClient:
             raise RuntimeError("ZHIPU_API_KEY 未设置")
 
     def _post_embed(self, batch: list):
+        _global_rate_limit(self.rate_ms)
         return requests.post(
             f"{self.base}/embeddings",
             headers={
@@ -349,7 +427,6 @@ class ZhipuEmbedClient:
                     print(f"        ✗ 跳过 chunk (len={len(text)}): 400 {body}")
                     return None
                 r.raise_for_status()
-                time.sleep(self.rate_ms / 1000)
                 return r.json()['data'][0]['embedding']
             except requests.exceptions.RequestException as e:
                 if attempt == 1:
@@ -372,7 +449,6 @@ class ZhipuEmbedClient:
                     r.raise_for_status()
                     data = r.json()['data']
                     results.extend([d['embedding'] for d in data])
-                    time.sleep(self.rate_ms / 1000)
                     ok = True
                     break
                 except requests.exceptions.RequestException as e:

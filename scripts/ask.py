@@ -28,26 +28,34 @@ from common import (
     VAULT_ROOT, scan_notes, rel_path, meta_mirror, ensure_parent, ZhipuEmbedClient,
     find_all_wikilinks, find_all_mdlinks, iter_markdown_content_lines,
     WIKILINK_RE, resolve_wikilink, resolve_mdlink, parse_aliases, log_script_run,
-    rerank_with_llm,
+    rerank_with_llm, office_extract_source,
 )
 from embed import blob_to_embedding
 try:
     from build_graph import get_neighbors, find_shortest_path
 except ImportError:
-    # build_graph.py 属 Phase 1b bundle；Phase 1a 下 --neighbors/--path 不可用（核心检索不受影响）
+    # build_graph.py 缺失时 --neighbors/--path 不可用（核心检索不受影响）
     get_neighbors = None
     find_shortest_path = None
 try:
     from bm25_index import search as bm25_search
 except ImportError:
-    # bm25_index.py 属 Phase 2 bundle；Phase 1 下 --bm25/--hybrid 不可用
+    # bm25_index.py 缺失时 --bm25/--hybrid 不可用
     bm25_search = None
 
 DB_PATH = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
 GRAPH_PATH = VAULT_ROOT / '.meta' / 'graph.json'
 SECONDS_PER_YEAR = 365.25 * 86400
-# Embeddings 表增长预警阈值（约 10× 当前规模 4,251 行，按 ~860 行/月增速约 3-4 年后触发）
+# Embeddings 表增长预警阈值：全表余弦扫描在此规模后开始变慢
 EMBEDDINGS_WARN_THRESHOLD = 40000
+
+# === 低置信自动升级配置（初始启发式，随 .meta/escalation-stats.jsonl 校准数据重设）===
+ESCALATION_THRESHOLD = 0.6             # final top-1 < 此值 → low_confidence（作用于含 --decay 的 final score）
+ESCALATION_HYBRID_WEIGHTS = (0.3, 0.7) # (dense, bm25)；BM25 重权，对症 tag/字面失配
+GRAY_ZONE_LO, GRAY_ZONE_HI = 0.5, 0.7  # 衰减感知灰区 final score 区间
+GRAY_ZONE_AGE_YEARS = 1.0              # 灰区要求 top-1 结果 age > 此年数
+ESCALATION_RECALL_TOP_K = 15           # low_conf 时 hybrid 扩召回 top-k
+ESCALATION_STATS_LOG = VAULT_ROOT / '.meta' / 'escalation-stats.jsonl'
 
 
 @dataclass(frozen=True)
@@ -150,7 +158,7 @@ _file_dates: dict | None = None
 
 
 def _load_file_dates() -> dict:
-    """加载 .meta/file-dates.json（主机维护时生成，OneDrive 同步到从机）"""
+    """加载 .meta/file-dates.json（主机维护时生成，网盘同步到从机）"""
     global _file_dates
     if _file_dates is not None:
         return _file_dates
@@ -180,7 +188,7 @@ def get_file_age_years(path: str) -> float | None:
         result = subprocess.run(
             ['git', 'log', '-1', '--format=%at', '--', path],
             capture_output=True, text=True, cwd=str(VAULT_ROOT),
-            timeout=5
+            timeout=5, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         )
         if result.returncode == 0 and result.stdout.strip():
             last_ts = float(result.stdout.strip())
@@ -261,6 +269,9 @@ def print_results(results):
                 summary = parts[2].strip()[:160] if len(parts) >= 3 else ""
             except: pass
         print(f"{i}. [{sim:.3f}]  {path}")
+        src = office_extract_source(path)
+        if src != path:
+            print(f"     📎 源文件: {src}（office 提取，编辑请改源文件）")
         if summary:
             print(f"     {summary}")
         print()
@@ -672,6 +683,168 @@ def rerank_results(query, results, top_m=5):
     return sorted(path_scores.items(), key=lambda x: -x[1])[:top_m]
 
 
+def _frontmatter_tags(path: str) -> set:
+    """读取笔记 frontmatter 的 tags（lowercased）。失败/无则空集。"""
+    try:
+        full = VAULT_ROOT / path
+        if not full.exists():
+            return set()
+        text = full.read_text(encoding='utf-8')
+        if not text.startswith('---'):
+            return set()
+        parts = text.split('---', 2)
+        if len(parts) < 3:
+            return set()
+        fm = parts[1]
+        tags = set()
+        in_tags_block = False
+        for line in fm.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('tags:'):
+                rest = stripped[5:].strip()
+                if rest.startswith('['):
+                    for t in rest.strip('[]').split(','):
+                        t = t.strip().strip('"').strip("'").lower()
+                        if t:
+                            tags.add(t)
+                    in_tags_block = False
+                elif rest == '':
+                    in_tags_block = True
+                else:
+                    for t in rest.replace(',', ' ').split():
+                        tags.add(t.strip('"').strip("'").lower())
+                    in_tags_block = False
+                continue
+            if in_tags_block:
+                if line[:1] in (' ', '\t'):
+                    t = stripped.lstrip('-').strip().strip('"').strip("'").lower()
+                    if t:
+                        tags.add(t)
+                else:
+                    in_tags_block = False
+        return tags
+    except Exception:
+        return set()
+
+
+def _query_terms(query: str) -> list:
+    """分词：保留 CJK 连续段与长度≥2的拉丁/数字串（lowercased）。"""
+    return re.findall(r'[\u4e00-\u9fff]+|[A-Za-z0-9]{2,}', query.lower())
+
+
+def _check_tag_miss(results: list, query: str) -> bool:
+    """top-5 中无任何笔记的 frontmatter tag 与 query 词相交 → True（字面失配信号）。
+    office 提取 sidecar 天然无用户 tag，不参与判定——top-5 全为 sidecar 时不触发。"""
+    qterms = _query_terms(query)
+    if not qterms:
+        return False
+    candidates = [p for p, _ in results[:5]
+                  if not p.startswith('.meta/office-extracts/')]
+    if not candidates:
+        return False
+    for path in candidates:
+        tags = _frontmatter_tags(path)
+        for tag in tags:
+            for qt in qterms:
+                if qt in tag or tag in qt:
+                    return False
+    return True
+
+
+def _log_escalation(query, triggers, branches, top1_path, top1_score, new_hits):
+    """向 .meta/escalation-stats.jsonl 追加一行校准记录（A.4）。失败静默。"""
+    try:
+        ensure_parent(ESCALATION_STATS_LOG)
+        entry = {
+            'ts': datetime.now().isoformat(timespec='seconds'),
+            'query': query[:120],
+            'triggers': triggers,
+            'branches': branches,
+            'top1_path': top1_path,
+            'top1_score': round(float(top1_score), 4),
+            'new_hits': new_hits[:10],
+            'new_hit_count': len(new_hits),
+        }
+        with open(ESCALATION_STATS_LOG, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+
+
+def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=True):
+    """低置信自动升级（Phase 1a）。仅在默认 dense 查询路径调用。
+
+    触发（独立 OR）：low_confidence / tag_miss / gray_zone。
+    升级（query 自适应，对应 plan D3 四分支）：hybrid(BM25 重) / deep(抽象) / rerank / top-k 扩展。
+    返回 (merged_results, branch_log)。无触发时原样返回 + 空日志。
+    """
+    if not results:
+        return results, []
+    top1_path, top1_score = results[0]
+
+    low_conf = top1_score < ESCALATION_THRESHOLD
+    tag_miss = _check_tag_miss(results, query)
+    top1_age = get_file_age_years(top1_path)
+    gray = (GRAY_ZONE_LO <= top1_score <= GRAY_ZONE_HI
+            and top1_age is not None and top1_age > GRAY_ZONE_AGE_YEARS)
+
+    triggers = []
+    if low_conf:
+        triggers.append('low_confidence')
+    if tag_miss:
+        triggers.append('tag_miss')
+    if gray:
+        triggers.append('gray_zone')
+    if not triggers:
+        return results, []
+
+    best = {p: s for p, s in results}
+    orig_paths = set(best.keys())
+    branches = []
+
+    # 分支 1+4：hybrid（BM25 重权，扩召回）——对所有触发都跑（recall 不足时用 ESCALATION_RECALL_TOP_K）
+    hyb_k = ESCALATION_RECALL_TOP_K if low_conf else max(top_k, 10)
+    try:
+        hyb = hybrid_search(query, top_k=hyb_k, scope=scope,
+                            decay_params=decay_params, weights=ESCALATION_HYBRID_WEIGHTS)
+        for p, s in hyb:
+            if p not in best or s > best[p]:
+                best[p] = s
+        branches.append('hybrid')
+    except Exception as e:
+        branches.append(f'hybrid_failed:{type(e).__name__}')
+
+    # 分支 2：deep（抽象主题 — low_conf 且非 tag_miss，即字面未失配但语义召回弱）
+    if low_conf and not tag_miss:
+        try:
+            rounds = deep_search(query, iterations=2, breadth=max(top_k, 5),
+                                 scope=scope, decay_params=decay_params)
+            for _, r, _ in rounds:
+                for p, s in r:
+                    if p not in best or s > best[p]:
+                        best[p] = s
+            branches.append('deep')
+        except Exception as e:
+            branches.append(f'deep_failed:{type(e).__name__}')
+
+    # 分支 3：rerank（候选 ≥10 时精排；allow_rerank=False 跳过，如用户已传 --rerank）
+    if allow_rerank and len(best) >= 10:
+        try:
+            cand = sorted(best.items(), key=lambda x: -x[1])[:20]
+            rr = rerank_results(query, cand, top_m=top_k)
+            for p, s in rr:
+                if p not in best or s > best[p]:
+                    best[p] = s
+            branches.append('rerank')
+        except Exception as e:
+            branches.append(f'rerank_failed:{type(e).__name__}')
+
+    merged = sorted(best.items(), key=lambda x: -x[1])[:top_k]
+    new_hits = [p for p, _ in merged if p not in orig_paths]
+    _log_escalation(query, triggers, branches, top1_path, top1_score, new_hits)
+    return merged, branches
+
+
 def main():
     log_script_run()
     parser = argparse.ArgumentParser(description='语义查询 / 查重 / 孤儿检测')
@@ -706,7 +879,7 @@ def main():
 
     if args.neighbors:
         if get_neighbors is None:
-            print("错误：--neighbors 需要 build_graph.py（Phase 1b 脚本）。当前安装未包含，请升级到 Phase 1b 或检查 .meta/scripts/。", file=sys.stderr)
+            print("错误：--neighbors 需要 build_graph.py。请检查 .meta/scripts/ 安装是否完整。", file=sys.stderr)
             sys.exit(1)
         result = get_neighbors(args.neighbors, max_hops=args.max_hops)
         if isinstance(result, dict) and "error" in result:
@@ -719,7 +892,7 @@ def main():
 
     if args.path:
         if find_shortest_path is None:
-            print("错误：--path 需要 build_graph.py（Phase 1b 脚本）。当前安装未包含，请升级到 Phase 1b 或检查 .meta/scripts/。", file=sys.stderr)
+            print("错误：--path 需要 build_graph.py。请检查 .meta/scripts/ 安装是否完整。", file=sys.stderr)
             sys.exit(1)
         source, target = args.path
         result = find_shortest_path(source, target)
@@ -763,6 +936,10 @@ def main():
     if use_hybrid and use_bm25:
         print("错误：--hybrid 与 --bm25 互斥", file=sys.stderr)
         sys.exit(2)
+
+    if (use_hybrid or use_bm25) and bm25_search is None:
+        print("错误：--bm25/--hybrid 需要 bm25_index.py。请检查 .meta/scripts/ 安装是否完整。", file=sys.stderr)
+        sys.exit(1)
 
     if args.deep and use_bm25:
         print("错误：--deep 不与 --bm25 组合（BM25 不支持语义查询扩展）。请用 --hybrid --deep", file=sys.stderr)
@@ -839,6 +1016,16 @@ def main():
             results = []
     else:
         results = semantic_search(query, top_k=top_k, scope=args.scope, decay_params=decay_params)
+        # 低置信自动升级（Phase 1a）：仅默认 dense 查询路径 + 非 --check。
+        # --hybrid/--bm25/--deep 走其他分支/早退，天然不触发（A.2）；--rerank 时 allow_rerank=False 避免双重精排
+        if not args.check:
+            _esc, _esc_log = auto_escalate(
+                query, results, top_k=top_k, scope=args.scope,
+                decay_params=decay_params, allow_rerank=not args.rerank,
+            )
+            if _esc_log:
+                results = _esc
+                print(f"  [auto-escalated] → {' + '.join(_esc_log)}")
     if args.rerank:
         rerank_m = args.rerank_top_m if args.rerank_top_m is not None else min(top_k, 5)
         results = rerank_results(query, results, top_m=rerank_m)

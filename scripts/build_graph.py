@@ -45,7 +45,7 @@ from common import (
     iter_markdown_content_lines, INTERNAL_ATTACHMENT_EXTS,
     extract_frontmatter, parse_aliases,
     pick_closest_by_prefix, resolve_wikilink, resolve_mdlink,
-    is_primary_host, SEMANTIC_THRESHOLD,
+    is_primary_host, SEMANTIC_THRESHOLD, is_excluded,
 )
 
 GRAPH_PATH = VAULT_ROOT / '.meta' / 'graph.json'
@@ -101,9 +101,9 @@ def build_attachment_index() -> dict:
             continue
         if path.suffix.lower() not in INTERNAL_ATTACHMENT_EXTS:
             continue
-        rel = rel_path(path)
-        if rel.startswith('000【备忘录'):
+        if is_excluded(path):
             continue
+        rel = rel_path(path)
         by_key[path.name.lower()].append(rel)
         by_key[path.stem.lower()].append(rel)
 

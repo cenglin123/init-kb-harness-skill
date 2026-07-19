@@ -10,13 +10,14 @@ import sys
 import re
 import sqlite3
 import struct
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_indexable_notes, content_hash, rel_path,
-    ZhipuEmbedClient, ENV,
+    ZhipuEmbedClient, ENV, MAINTAIN_CONCURRENCY,
 )
 
 DB_PATH = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
@@ -66,6 +67,9 @@ def chunk_text(text: str) -> list:
 
 def init_db():
     con = sqlite3.connect(str(DB_PATH))
+    # WAL：允许 summarize（读）与 embed（写）双进程并行不互锁；busy_timeout 兜底
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
     con.execute("""
         CREATE TABLE IF NOT EXISTS embeddings (
             path TEXT NOT NULL,
@@ -128,29 +132,48 @@ def main(full=False):
         db.close()
         return 0
 
-    print(f"  待嵌入: {len(targets)} 篇")
-    client = ZhipuEmbedClient()
+    print(f"  待嵌入: {len(targets)} 篇（并发 {MAINTAIN_CONCURRENCY}）")
+    try:
+        client = ZhipuEmbedClient()
+    except RuntimeError as e:
+        print(f"  ✗ {e}——请在 .env 配置后重跑维护")
+        db.close()
+        return 1
 
-    for i, (rel, h, content) in enumerate(targets, 1):
-        db.execute("DELETE FROM embeddings WHERE path=?", (rel,))
+    def _embed_file(item):
+        """线程内只做 API 调用；SQLite 写入统一回主线程。"""
+        rel, h, content = item
         chunks = chunk_text(content)
-        tag = f"(分块 {len(chunks)})" if len(chunks) > 1 else ""
-        print(f"  [{i}/{len(targets)}] {rel} {tag}")
         vecs = client.embed_batch(chunks)
-        now = datetime.now().isoformat()
-        inserted = 0
-        for idx, (chunk, vec) in enumerate(zip(chunks, vecs)):
-            if vec is None:
-                print(f"    [skip chunk {idx}] embedding 失败（可能 token 超限）")
+        return rel, h, chunks, vecs
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=MAINTAIN_CONCURRENCY) as pool:
+        futures = {pool.submit(_embed_file, t): t[0] for t in targets}
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                rel, h, chunks, vecs = fut.result()
+            except Exception as e:
+                print(f"  [{done}/{len(targets)}] ✗ {futures[fut]} embedding 失败: {e}")
                 continue
-            db.execute(
-                "INSERT INTO embeddings VALUES (?,?,?,?,?,?,?)",
-                (rel, idx, h, chunk, vec_to_blob(vec), client.model, now)
-            )
-            inserted += 1
-        db.commit()
-        if inserted == 0:
-            print(f"    ⚠  本文件所有分块均失败，未写入任何向量")
+            tag = f"(分块 {len(chunks)})" if len(chunks) > 1 else ""
+            print(f"  [{done}/{len(targets)}] {rel} {tag}")
+            db.execute("DELETE FROM embeddings WHERE path=?", (rel,))
+            now = datetime.now().isoformat()
+            inserted = 0
+            for idx, (chunk, vec) in enumerate(zip(chunks, vecs)):
+                if vec is None:
+                    print(f"    [skip chunk {idx}] embedding 失败（可能 token 超限）")
+                    continue
+                db.execute(
+                    "INSERT INTO embeddings VALUES (?,?,?,?,?,?,?)",
+                    (rel, idx, h, chunk, vec_to_blob(vec), client.model, now)
+                )
+                inserted += 1
+            db.commit()
+            if inserted == 0:
+                print(f"    ⚠  本文件所有分块均失败，未写入任何向量")
 
     db.close()
     print(f"  ✓ 完成 embeddings.sqlite")

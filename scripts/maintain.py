@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-maintain-lite.py — init-kb-harness 精简维护管线（Phase 1）
+maintain.py — init-kb-harness 维护主入口（完整管线）
 
-剥离 dream / synthesis_index / knowledge_map / bm25_index / semantic_lint / gc
-（Phase 2/3 解锁时换完整 maintain.py）。
-Phase 1b 脚本（detect_renames / check_sidecar / build_graph / health_report）
-用存在性守护——Phase 1a 最小安装时自动跳过，1b 安装后自动纳入。
+编排（批量任务默认并行）：
+    提交用户改动 → detect_renames → check_sidecar_sources --fix
+    → extract_office（office 文档 sidecar 提取，内部 ThreadPool 并发）
+    → embed ∥ summarize（双进程并行；各自内部再按 MAINTAIN_CONCURRENCY 并发 API）
+    → build_index → build_graph → bm25_index --build → knowledge_map
+    → health_report → [--semantic-lint] semantic_lint → dream
+    → file-dates / workflow frequency / CHANGELOG → 提交 Agent 产物
 
 用法:
-    python maintain-lite.py            # 增量
-    python maintain-lite.py --full     # 全量
-    python maintain-lite.py --no-git   # 跳过 git 提交（调试用）
-    python maintain-lite.py --no-git --skip-changelog
+    python .meta/scripts/maintain.py                  # 增量
+    python .meta/scripts/maintain.py --full           # 全量
+    python .meta/scripts/maintain.py --no-git         # 跳过 git 提交（调试用）
+    python .meta/scripts/maintain.py --semantic-lint  # 附加语义 Lint（P0+P1）
+    python .meta/scripts/maintain.py --no-git --skip-changelog
 """
 
 import sys
@@ -27,6 +31,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
+
+# Windows 下隐藏子进程窗口
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def summarize_command_output(output: str) -> list:
@@ -44,6 +51,13 @@ def summarize_command_output(output: str) -> list:
             count = int(m.group(1))
             if count > 0:
                 bullets.append(f"更新 {count} 篇笔记的 embedding")
+            continue
+
+        m = re.search(r'office 提取完成：(\d+) 提取', stripped)
+        if m:
+            count = int(m.group(1))
+            if count > 0:
+                bullets.append(f"提取 {count} 个 office 文档纳入检索")
             continue
 
         m = re.search(r'Git 检测到\s*(\d+)\s*个重命名', stripped)
@@ -101,7 +115,7 @@ def summarize_command_output(output: str) -> list:
 
 def build_changelog_bullets(full, outputs):
     bullets = []
-    for key in ('rename', 'embed', 'summarize', 'index', 'health'):
+    for key in ('rename', 'office', 'embed', 'summarize', 'index', 'knowledge_map', 'health'):
         bullets.extend(summarize_command_output(outputs.get(key, '')))
 
     if full:
@@ -119,7 +133,7 @@ def build_changelog_bullets(full, outputs):
 
 def format_outputs_for_failure(outputs):
     parts = []
-    for key in ('rename', 'embed', 'summarize', 'index', 'health'):
+    for key in ('rename', 'office', 'embed', 'summarize', 'index', 'knowledge_map', 'health'):
         out = outputs.get(key, '').strip()
         if out:
             parts.append(f"[{key}]\n{out}")
@@ -142,13 +156,14 @@ def run_script(name, full=False, extra_args=None):
         cmd.extend(extra_args)
     return subprocess.run(
         cmd, cwd=str(VAULT_ROOT),
-        capture_output=True, text=True, encoding='utf-8', errors='replace'
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        creationflags=_NO_WINDOW,
     )
 
 
 def update_current_status(path, start):
     if not path.exists():
-        return  # CURRENT.md 已废除，静默跳过
+        return  # 无 docs/CURRENT.md（未装 init-agent-docs 层）时静默跳过
     text = path.read_text(encoding='utf-8')
     new_date = f"**日期**：{start.strftime('%Y-%m-%d')}"
     text = re.sub(r'^\*\*日期\*\*：.*$', new_date, text, count=1, flags=re.MULTILINE)
@@ -164,7 +179,7 @@ def update_current_status(path, start):
 
 def generate_file_dates(git_ok):
     """生成 .meta/file-dates.json —— 每文件 git last-commit 时间戳字典。
-    从机通过 OneDrive 同步此文件，无需本地 git 即可获取内容年龄。"""
+    从机通过网盘同步此文件，无需本地 git 即可获取内容年龄。"""
     dates = {}
     if git_ok:
         db_path = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
@@ -179,7 +194,7 @@ def generate_file_dates(git_ok):
                     result = subprocess.run(
                         ['git', 'log', '-1', '--format=%at', '--', path],
                         capture_output=True, text=True, cwd=str(VAULT_ROOT),
-                        timeout=5
+                        timeout=5, creationflags=_NO_WINDOW,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         dates[path] = float(result.stdout.strip())
@@ -191,11 +206,9 @@ def generate_file_dates(git_ok):
 
 
 # ---------------------------------------------------------------------------
-# Memory 健康维护 — workflow frequency 自动化 + 衰减预警
+# Memory 健康维护 — workflow frequency 自动化
 # ---------------------------------------------------------------------------
-_WORKFLOW_HALF_LIFE_DAYS = 90
-_WORKFLOW_DECAY_FREQ_THRESHOLD = 0.05
-_WORKFLOW_FREQ_WINDOW_DAYS = 30
+_WORKFLOW_FREQ_WINDOW_DAYS = 30    # frequency 计算窗口
 
 
 def _update_workflow_frequency():
@@ -239,7 +252,7 @@ def _update_workflow_frequency():
                  pattern, '--json', '--type', 'user',
                  '--since', cutoff_date, '--limit', '9999'],
                 capture_output=True, text=True, timeout=30,
-                cwd=str(VAULT_ROOT),
+                cwd=str(VAULT_ROOT), creationflags=_NO_WINDOW,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             print(f"  [warn] memory frequency: search_sessions.py unavailable for {wf_file.name}, skipping")
@@ -265,7 +278,7 @@ def _update_workflow_frequency():
                 fm.dump(post, str(wf_file))
             continue
 
-        post['frequency'] = round(new_freq, 1)
+        post['frequency'] = round(new_freq, 3)
         post['last_used'] = last_used_str
         fm.dump(post, str(wf_file))
 
@@ -289,16 +302,11 @@ def _insert_changelog_entry_safe(changelog_path, start, full, bullets, skip_chan
     )
 
 
-def update_maintenance_docs(changelog_path, current_path, start, skip_changelog=False):
-    """维护文档刷新——CHANGELOG 历史清理跳过（精简版不处理历史条目清理），仅安全地更新 CURRENT.md。"""
-    update_current_status(current_path, start)
-
-
-def main(full=False, no_git=False, skip_changelog=False):
+def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     log_script_run()
     start = datetime.now()
     print(f"=== 维护开始 @ {start.isoformat()} ===")
-    print(f"模式: {'全量 (--full)' if full else '增量'}  (maintain-lite)")
+    print(f"模式: {'全量 (--full)' if full else '增量'}")
 
     # 主从检测
     if not is_primary_host():
@@ -316,9 +324,9 @@ def main(full=False, no_git=False, skip_changelog=False):
 
     outputs = {}
 
-    # 1/5 · 提交用户改动
+    # 1/6 · 提交用户改动
     if git_ok and not no_git:
-        print("\n[1/5] 提交用户未保存改动 ...")
+        print("\n[1/6] 提交用户未保存改动 ...")
         st = git('status', '--porcelain', check=False)
         if st.stdout.strip():
             git('add', '-u', check=False)
@@ -327,37 +335,38 @@ def main(full=False, no_git=False, skip_changelog=False):
         else:
             print("  ✓ 无未提交改动")
     else:
-        print("\n[1/5] Git 已跳过")
+        print("\n[1/6] Git 已跳过")
 
-    # [Phase 2/3] GC — 维护完整 maintain.py 解锁
+    # 2/6 · 重命名检测
+    print("\n[2/6] 检测重命名 ...")
+    rename_result = run_script('detect_renames.py')
+    outputs['rename'] = log_subprocess_result('rename', rename_result)
+    if rename_result.returncode != 0:
+        print("  ⚠️  detect_renames 失败（非致命）")
 
-    # 2/5 · 重命名检测（Phase 1b 守护）
-    if (SCRIPTS_DIR / 'detect_renames.py').exists():
-        print("\n[2/5] 检测重命名 ...")
-        rename_result = run_script('detect_renames.py')
-        outputs['rename'] = log_subprocess_result('rename', rename_result)
-        if rename_result.returncode != 0:
-            print("  ⚠️  detect_renames 失败（非致命）")
-    else:
-        print("\n[2/5] detect_renames 未安装（Phase 1a 最小安装），跳过")
+    print("\n[+] 校验伴生文件 source ...")
+    sidecar_result = run_script('check_sidecar_sources.py', extra_args=['--fix'])
+    outputs['sidecar_sources'] = log_subprocess_result('sidecar_sources', sidecar_result)
+    if sidecar_result.returncode != 0:
+        print("  ⚠️  check_sidecar_sources 失败（非致命）")
 
-    # Phase 1b · 校验伴生文件 source（守护）
-    if (SCRIPTS_DIR / 'check_sidecar_sources.py').exists():
-        print("\n[+] 校验伴生文件 source ...")
-        sidecar_result = run_script('check_sidecar_sources.py', extra_args=['--fix'])
-        outputs['sidecar_sources'] = log_subprocess_result('sidecar_sources', sidecar_result)
-        if sidecar_result.returncode != 0:
-            print("  ⚠️  check_sidecar_sources 失败（非致命）")
+    # 3/6 · office 文档提取（sidecar；embed 之前跑，保证新提取当轮可检索）
+    print("\n[3/6] 提取 office 文档 ...")
+    office_result = run_script('extract_office.py', full=full)
+    outputs['office'] = log_subprocess_result('office', office_result)
+    if office_result.returncode != 0:
+        print("  ⚠️  extract_office 失败（非致命，office 内容暂不可检索）")
 
-    # 3/5 · 嵌入（后台启动，与摘要并行）
-    print("\n[3/5] 生成嵌入 + 摘要 / tag / 关联（并行）...")
+    # 4/6 · 嵌入（后台启动，与摘要并行；两脚本内部再按 MAINTAIN_CONCURRENCY 并发）
+    print("\n[4/6] 生成嵌入 + 摘要 / tag / 关联（并行）...")
     embed_cmd = [sys.executable, str(SCRIPTS_DIR / 'embed.py')]
     if full:
         embed_cmd.append('--full')
     embed_proc = subprocess.Popen(
         embed_cmd, cwd=str(VAULT_ROOT),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding='utf-8', errors='replace'
+        text=True, encoding='utf-8', errors='replace',
+        creationflags=_NO_WINDOW,
     )
 
     summarize_result = run_script('summarize.py', full=full)
@@ -376,42 +385,53 @@ def main(full=False, no_git=False, skip_changelog=False):
         print("  ✗ summarize 失败，中止")
         return 1
 
-    # 5/5 · 构建索引
-    print("\n[5/5] 构建索引 ...")
+    # 5/6 · 构建索引
+    print("\n[5/6] 构建索引 ...")
     index_result = run_script('build_index.py')
     outputs['index'] = log_subprocess_result('index', index_result)
     if index_result.returncode != 0:
         print("  ✗ build_index 失败")
         return 1
 
-    # Phase 1b · 全局图谱（守护）
-    if (SCRIPTS_DIR / 'build_graph.py').exists():
-        print("\n[+] 构建全局图谱 ...")
-        graph_result = run_script('build_graph.py')
-        outputs['graph'] = log_subprocess_result('graph', graph_result)
-        if graph_result.returncode != 0:
-            print("  ⚠️  build_graph 失败（非致命）")
+    # 6/6 · 派生层：图谱 → BM25 → 知识地图 → 健康报告
+    print("\n[6/6] 构建全局图谱 ...")
+    graph_result = run_script('build_graph.py')
+    outputs['graph'] = log_subprocess_result('graph', graph_result)
+    if graph_result.returncode != 0:
+        print("  ⚠️  build_graph 失败（非致命）")
 
-    # [Phase 2/3] BM25 索引 — 维护完整 maintain.py 解锁
-    # [Phase 2/3] 知识地图 (knowledge_map.py) — 维护完整 maintain.py 解锁
+    print("\n[+] 构建 BM25 索引 ...")
+    bm25_result = run_script('bm25_index.py', extra_args=['--build'])
+    log_subprocess_result('bm25', bm25_result)
+    if bm25_result.returncode != 0:
+        print("  ⚠️  BM25 索引构建失败（非致命）")
 
-    # Phase 1b · 健康报告（守护）
-    if (SCRIPTS_DIR / 'health_report.py').exists():
-        print("\n[+] 生成健康报告 ...")
-        health_result = run_script('health_report.py')
-        outputs['health'] = log_subprocess_result('health', health_result)
-        if health_result.returncode != 0:
-            print("  ⚠️  health_report 失败（非致命）")
+    print("\n[+] 生成知识地图 ...")
+    kmap_result = run_script('knowledge_map.py')
+    outputs['knowledge_map'] = log_subprocess_result('knowledge_map', kmap_result)
+    if kmap_result.returncode != 0:
+        print("  ⚠️  knowledge_map 失败（非致命）")
 
-    # [Phase 2/3] 合成索引 (synthesis_index.py) — 维护完整 maintain.py 解锁
-    # [Phase 2/3] 语义 Lint (semantic_lint) — 维护完整 maintain.py 解锁
+    print("\n[+] 生成健康报告 ...")
+    health_result = run_script('health_report.py')
+    outputs['health'] = log_subprocess_result('health', health_result)
+    if health_result.returncode != 0:
+        print("  ⚠️  health_report 失败（非致命）")
+
+    # 附加 · 语义 Lint（--semantic-lint 时）
+    if semantic_lint:
+        print("\n[+] 语义 Lint (--semantic-lint) ...")
+        lint_result = run_script('semantic_lint.py')
+        outputs['semantic_lint'] = log_subprocess_result('semantic_lint', lint_result)
+        if lint_result.returncode != 0:
+            print("  ⚠️  semantic_lint 失败（非致命）")
 
     # 附加 · 文件日期清单（供从机检索时间衰减用）
     generate_file_dates(git_ok)
 
     changelog_path = VAULT_ROOT / 'docs' / 'CHANGELOG.md'
     current_path = VAULT_ROOT / 'docs' / 'CURRENT.md'
-    update_maintenance_docs(changelog_path, current_path, start, skip_changelog=skip_changelog)
+    update_current_status(current_path, start)
 
     # 附加 · workflow frequency 更新（非关键路径）
     print("\n[+] 更新 workflow frequency ...")
@@ -420,7 +440,11 @@ def main(full=False, no_git=False, skip_changelog=False):
     except Exception as e:
         print(f"  [warn] workflow frequency update failed: {e}")
 
-    # [Phase 2/3] Dream 报告 (dream.py) — 维护完整 maintain.py 解锁
+    # 附加 · Dream 报告（记忆活性扫描 + 衰减预警，非关键路径）
+    print("\n[+] 生成 Dream 报告 ...")
+    dream_result = run_script('dream.py', full=full)
+    outputs['dream'] = log_subprocess_result('dream', dream_result)
+    # Dream 失败不阻断维护
 
     # 提交 Agent 产物
     if git_ok and not no_git:
@@ -439,7 +463,7 @@ def main(full=False, no_git=False, skip_changelog=False):
             if appended:
                 git('add', 'docs/CHANGELOG.md', check=False)
             mode = 'full' if full else 'incremental'
-            git('commit', '-m', f'agent: {mode} maintenance (lite) {start.isoformat()}', '--allow-empty', check=False)
+            git('commit', '-m', f'agent: {mode} maintenance {start.isoformat()}', '--allow-empty', check=False)
             print("  ✓ 已提交")
         else:
             print("  ✓ 无 Agent 产物变化")
@@ -447,18 +471,20 @@ def main(full=False, no_git=False, skip_changelog=False):
         pass
 
     elapsed = (datetime.now() - start).total_seconds()
-    print(f"\n=== 维护完成（lite），耗时 {elapsed:.1f}s ===")
+    print(f"\n=== 维护完成，耗时 {elapsed:.1f}s ===")
     return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='init-kb-harness 精简维护管线 (Phase 1)')
+    parser = argparse.ArgumentParser(description='init-kb-harness 维护主入口')
     parser.add_argument('--full', action='store_true', help='全量重置')
     parser.add_argument('--no-git', action='store_true', help='跳过 git 提交')
+    parser.add_argument('--semantic-lint', action='store_true', help='附加语义 Lint (P0+P1)')
     parser.add_argument('--skip-changelog', action='store_true', help='跳过 CHANGELOG 读写')
     args = parser.parse_args()
     sys.exit(main(
         full=args.full,
         no_git=args.no_git,
+        semantic_lint=args.semantic_lint,
         skip_changelog=args.skip_changelog,
     ))

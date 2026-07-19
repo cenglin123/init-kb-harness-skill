@@ -404,8 +404,12 @@ def main():
     sparse = find_sparse_categories(by_category)
     deviation_signals = load_deviation_signals()
 
-    # 收件箱扫描（带 LLM 建议）
-    inbox = inbox_scan_main()
+    # 收件箱扫描（带 LLM 建议）；API 不可用时降级为空清单，不阻断报告
+    try:
+        inbox = inbox_scan_main()
+    except Exception as e:
+        print(f"  ⚠️  收件箱扫描不可用（{e}），本轮跳过 LLM 归类建议")
+        inbox = []
 
     # 写 health-report.md（摘要）
     report = build_report(total, by_category, inbox, orphans, active_orphans, archived_orphans, sparse, deviation_signals)
