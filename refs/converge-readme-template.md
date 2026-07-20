@@ -18,7 +18,7 @@ source: init-kb-harness
 - 用户说"评议 / deliberate / 收敛"时进入 converge 流程。
 - 执行后"审计 / 复审 / 检查对齐"回到对应 active plan 的 `review`，由 fresh verifier
   按 `docs/plans/README.md`（若装了 init-agent-docs 的 plan 合同）验收；验收证据写入 plan。
-- 本仓库**不设** deliberations / audit 独立目录——单一 plan 生命周期已覆盖两者职能。
+- 本目录归档 converge 收敛产物（active/→done/）；执行后验收证据写入对应 plan 文件。
 
 ## 本地路径
 

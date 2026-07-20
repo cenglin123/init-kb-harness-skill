@@ -1,6 +1,6 @@
 # Maturity Rubric · 仓库规模信号参考
 
-> 全部量化、机械可判。**不再决定"装不装"**——Phase 1/2/3 全量必装（见 SKILL.md）。
+> 全部量化、机械可判。本 rubric 用于仓库画像与参数建议（Phase 1/2/3 全量必装，见 SKILL.md）。
 > 本 rubric 的用途：① Phase 0 向用户呈现仓库画像；② 调整参数阈值；③ 小库风险提示。
 > 输入信号来自 Phase 0 体检扫描 + health_report 产出。
 

@@ -63,7 +63,7 @@
 **③隐私读轴**（按"内容敏感度限制读取"）
 - **隐私目录**（Phase 0 嗅探 + category-privacy.md）→ 禁 Read/Grep
 
-**计划质量控制**采用同一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后 done`。执行前收敛由 converge SKILL 承担（`.meta/converge/README.md` 绑定本地路径），执行后验收由 fresh verifier 承担，证据写入 plan——不设 deliberations / audit 独立目录。
+**计划质量控制**采用同一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后 done`。执行前收敛由 converge SKILL 承担（`.meta/converge/README.md` 绑定本地路径），执行后验收由 fresh verifier 承担，证据写入 plan。
 
 > 消歧：「治理体系」指受门控的文件/门控轴集合；区别于 converge 判断动作模块（执行前收敛 + 执行后 fresh review 的单一生命周期）。
 

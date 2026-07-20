@@ -87,7 +87,7 @@ bootstrap_phase: "phase0"        # 已完成到的 Phase（phase0/1/2/3）；每
 ```
 
 > `bootstrap_status: in_progress` 期间，容忍建立必要的体系结构（维护管线、检索、入口）。
-> Occam **始终生效**——标记只是状态记录，非门控；新增结构仍须自证必要。
+> Occam 全程生效；`bootstrap_completed_at` 标记必要建立期的结束边界，新增结构仍须自证必要。
 
 ---
 

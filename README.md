@@ -4,7 +4,7 @@
 
 这是一个 **agent skill**（给 AI 编码助手用的能力包），不是独立命令行工具。需要在 Claude Code / Codex CLI / opencode 等 agent harness 里加载后由 agent 触发执行。
 
-> **与 init-agent-docs 的关系**：标准执行序是**先 init-agent-docs 打底**（docs/ 层级、plan-as-handoff、CHANGELOG 脚本化），**再本技能叠加**（检索/维护/记忆/治理）。两者哲学同源（AGENTS.md 是目录不是百科、渐进披露、Occam+Bitter Lesson）；AGENTS.md 一律以本技能模板为准覆盖（非叠加）。详见 SKILL.md 首节。
+> **与 init-agent-docs 的关系**：标准执行序是**先 init-agent-docs 打底**（docs/ 层级、plan-as-handoff、CHANGELOG 脚本化），**再本技能叠加**（检索/维护/记忆/治理）。两者哲学同源（AGENTS.md 是目录不是百科、渐进披露、Occam+Bitter Lesson）；AGENTS.md 一律以本技能模板为准覆盖。详见 SKILL.md 首节。
 
 ---
 
@@ -81,7 +81,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 本 skill 的 bundle 脚本（`scripts/*.py`）与作者自用知识库的 `.meta/scripts/` 演进会 drift。
 
 - 维护者检测 drift：`diff -r ~/.agents/skills/init-kb-harness/scripts/ <源仓库>/.meta/scripts/`（源仓库 = 作者的 vault，或 forker 的上游 fork）。
-- v0.4 起 bundle 与 vault 的**有意差异**（diff 时豁免）：bundle 无 vault 特化件（co_retrieval / gc / maintain_lock / maintain_trigger / governance_check / synthesis_index / search_sessions / inflight）；bundle 独有 extract_office.py（office 提取）与 embed/summarize 的 ThreadPool 并发；ask.py 去掉 co_retrieval 回写。
+- bundle 相对 vault 的差异（运营参考）：bundle 无 vault 特化件（co_retrieval / gc / maintain_lock / maintain_trigger / governance_check / synthesis_index / search_sessions / inflight）；bundle 独有 extract_office.py（office 提取）与 embed/summarize 的 ThreadPool 并发；ask.py 去掉 co_retrieval 回写。
 - DeepSeek 发布新代模型时，同步升级 `templates/env.example` 与 `scripts/common.py` 的默认型号为该代次等型号（策略见 SKILL.md §约束）。
 
 ---

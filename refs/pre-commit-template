@@ -11,10 +11,9 @@
 #   7. 隐私目录写入拦截（若 category-privacy.md 定义）
 #   8. 三文件一致性（AGENTS/CLAUDE/GEMINI MD5）
 #
-# 去耦说明（相对 vault 蓝本 .githooks/pre-commit）：
-#   - GOV 检测参数化：读 .meta/governed-files.txt（每行一个 glob），不硬绑路径
-#   - 治理生命周期已统一为 converge + fresh verifier；不再扫描 deliberations/audit
-#     （新装仓库不存在这两个目录）
+# 实现要点：
+#   - GOV 检测读 .meta/governed-files.txt（SSOT，每行一个 glob）
+#   - 治理走 converge + fresh verifier：执行前 converge 收敛、执行后 fresh verifier 验收
 
 STAGED_FILES=$(git diff --cached --name-only)
 

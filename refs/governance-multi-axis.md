@@ -15,7 +15,6 @@
 
 - **执行前**：converge（机制权威源 = 全局 `~/.agents/skills/converge/SKILL.md`；本地只绑路径）
 - **执行后**：fresh verifier 独立验收，证据写入 plan
-- 不设 deliberations / audit 独立目录——两者职能已并入该生命周期
 
 ## 门控轴（开放可扩展，当前 3 条）
 

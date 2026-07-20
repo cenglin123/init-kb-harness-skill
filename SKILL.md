@@ -28,7 +28,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 | 层 | init-agent-docs 提供 | 本技能叠加 |
 |----|---------------------|-----------|
 | 文档层级 | docs/STRUCTURE.md、plans/、CHANGELOG 脚本化 | docs/CONSTITUTION.md、docs/TAXONOMY.md |
-| 入口 | AGENTS/CLAUDE/GEMINI 三文件同步 | **AGENTS.md 以本技能 `refs/agents-template.md` 为准覆盖**（图书管理员准则 + 维护管线 + bootstrap 状态；两者 AGENTS.md 叙事不同，非叠加关系） |
+| 入口 | AGENTS/CLAUDE/GEMINI 三文件同步 | **AGENTS.md 以本技能 `refs/agents-template.md` 为准覆盖**（图书管理员准则 + 维护管线 + bootstrap 状态） |
 | 脚本 | changelog.py / agent_links.py / audit.py | `.meta/scripts/` 全套维护管线（同步机制统一用本技能 sync_agents.py） |
 | 治理 | ultraverge 判定原则 | converge 单一生命周期落地（`.meta/converge/` + governed-files SSOT） |
 
@@ -51,9 +51,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ### Occam 始终生效，bootstrap 期容忍必要建立
 
-用户约束：「Occam 可以不那么严格（因为就是要给它建立一个体系）」。
-
-**落地**：Occam **始终生效**——不存在"暂停/恢复"的状态机。bootstrap 期只是**容忍建立必要的体系结构**（维护管线、检索、入口），完成后新增结构仍须自证必要。本技能设一个 `bootstrap_completed_at` **完成标记**（状态记录，非机械门控），帮 agent 知道"必要建立期"是否结束。
+**落地**：Occam **全程生效**。bootstrap 期**容忍建立必要的体系结构**（维护管线、检索、入口），完成后新增结构仍须自证必要。`bootstrap_completed_at` 标记必要建立期的结束边界。
 
 ### 批量任务必须并行（效率红线）
 
@@ -72,8 +70,6 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | **自维护**（maintain 管线） | 自维护 + 永无死角 + 不重复建设 | maintain.py + extract_office/embed/summarize/index/graph/bm25/knowledge_map/health |
 | **自沉淀**（memory + 衰减） | 知识复利 | memory/ 结构 + dream.py + synthesize.py |
 | **自运行**（入口 + 检索 + 硬约束） | 全部四目标的跨会话可持续 | AGENTS.md + ask.py + pre-commit hook + converge 治理 |
-
-"三自"只是这三组机制的简称，非新理论；上表与四目标的映射是教学性归类，非因果推导依据。
 
 ---
 
@@ -136,7 +132,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 > **诚实标注**：maturity-rubric 的画像提示全部机械可判；bootstrap 完成判定含一次人审门（用户确认检索质量）——前者是信息呈现、后者决定体系是否就绪。
 
-**此后 Occam 继续生效（一直生效），新增结构须自证必要。**
+**此后 Occam 继续生效，新增结构须自证必要。**
 
 ---
 
@@ -213,7 +209,14 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 - `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"
 - 无 `bootstrap_status` 字段（首次）→ 从 Phase 0 开始
 - 已存在 `kb-bootstrap-plan.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
-- 检测到旧版安装（存在 `maintain-lite.py` 或 `.meta/deliberations/`）→ 按"旧版迁移"处理：删 maintain-lite.py、拷入全量脚本、deliberations/audit 若有历史内容则原地保留并在其 README 标注"只读证据归档，禁止新增"，治理统一走 `.meta/converge/`
+
+### 旧版兼容
+
+检测到旧版安装（目标仓库存在 `maintain-lite.py` 或 `.meta/deliberations/`）时，按"旧版迁移"路径处理：
+
+- 检测到旧版脚本 `maintain-lite.py` → 替换为 `maintain.py`，拷入全量脚本
+- `.meta/deliberations/` 或 audit 历史内容原地保留，在其 README 标注"只读证据归档，禁止新增"
+- 治理统一走 `.meta/converge/`
 
 ---
 
