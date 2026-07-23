@@ -8,7 +8,7 @@ maintain.py — init-kb-harness 维护主入口（完整管线）
     → extract_office（office 文档 sidecar 提取，内部 ThreadPool 并发）
     → embed ∥ summarize（双进程并行；各自内部再按 MAINTAIN_CONCURRENCY 并发 API）
     → build_index → build_graph → bm25_index --build → knowledge_map
-    → health_report → [--semantic-lint] semantic_lint → dream
+    → health_report → [--semantic-lint] semantic_lint → memory_index → dream
     → file-dates / workflow frequency / CHANGELOG → 提交 Agent 产物
 
 用法:
@@ -439,6 +439,13 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
         _update_workflow_frequency()
     except Exception as e:
         print(f"  [warn] workflow frequency update failed: {e}")
+
+    # 附加 · MEMORY.md 记忆索引重建（硬约束：索引由脚本维护，每次维护必跑）
+    print("\n[+] 重建 MEMORY.md 记忆索引 ...")
+    memidx_result = run_script('memory_index.py')
+    outputs['memory_index'] = log_subprocess_result('memory_index', memidx_result)
+    if memidx_result.returncode != 0:
+        print("  ⚠️  memory_index 失败（非致命）")
 
     # 附加 · Dream 报告（记忆活性扫描 + 衰减预警，非关键路径）
     print("\n[+] 生成 Dream 报告 ...")

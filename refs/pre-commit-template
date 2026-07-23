@@ -10,6 +10,7 @@
 #   6. API key 泄露扫描
 #   7. 隐私目录写入拦截（若 category-privacy.md 定义）
 #   8. 三文件一致性（AGENTS/CLAUDE/GEMINI MD5）
+#   9. MEMORY.md 记忆索引一致性（硬约束：索引由 memory_index.py 自动维护）
 #
 # 实现要点：
 #   - GOV 检测读 .meta/governed-files.txt（SSOT，每行一个 glob）
@@ -209,6 +210,28 @@ if [ "$AGENTS_MD5" != "$CLAUDE_MD5" ] || [ "$AGENTS_MD5" != "$GEMINI_MD5" ]; the
     echo "  2. 运行：python .meta/scripts/sync_agents.py"
     echo "  3. 再次提交"
     exit 1
+fi
+
+# ─── 9. MEMORY.md 记忆索引一致性（硬拦截） ───
+# 记忆索引由 memory_index.py 自动维护，不允许依赖 agent 手动更新。
+# .meta/memory/** 有变更时，MEMORY.md 索引段必须与磁盘实际内容一致。
+MEMORY_CHANGED=0
+while IFS= read -r path; do
+    case "$path" in
+        .meta/memory/*) MEMORY_CHANGED=1 ;;
+    esac
+done <<< "$STAGED_FILES"
+
+if [ "$MEMORY_CHANGED" -eq 1 ] && [ -f ".meta/scripts/memory_index.py" ] && [ -f ".meta/memory/MEMORY.md" ]; then
+    if ! python .meta/scripts/memory_index.py --check; then
+        echo ""
+        echo "⚠️  Git commit 被拒绝：MEMORY.md 记忆索引过期"
+        echo ""
+        echo "记忆索引是脚本自动维护的硬约束。请先运行："
+        echo "  python .meta/scripts/memory_index.py && git add .meta/memory/MEMORY.md"
+        echo "再重新提交。"
+        exit 1
+    fi
 fi
 
 exit 0

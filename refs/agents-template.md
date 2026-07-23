@@ -15,6 +15,16 @@
 ### 检索方法默认
 任何寻找仓库内容的步骤默认调用 `.meta/scripts/ask.py`（语义检索；低置信时自动升级 hybrid/deep/rerank，无需手动决定）。Grep 仅用于已知精确字符串/路径定位、frontmatter 字段等结构性匹配。
 
+### 任务执行前必须先检索记忆系统
+接到任何任务后、动手执行前，**必须先检索记忆系统查看可能的过往经验**：
+1. 读 `.meta/memory/MEMORY.md` 索引，看 project / reference / user / workflows / feedback 各类下有哪些记忆条目
+2. 有相关条目则读取对应文件；不确定时跑 `python .meta/scripts/ask.py --scope memory "<任务关键词>"`
+
+唯一豁免：用户当次明确说"不用查记忆/直接做"。否则此步不可跳过——重复踩已沉淀过的坑是记忆系统存在的反例。
+
+### MEMORY.md 索引由脚本维护（硬约束）
+`.meta/memory/MEMORY.md` 的"当前记忆条目"段由 `.meta/scripts/memory_index.py` 自动重建（标记段 `<!-- memory-index:start/end -->` 内禁止手改）。新建/删除/重命名记忆文件后运行 `python .meta/scripts/memory_index.py` 刷新索引；maintain.py 每次维护自动重建，pre-commit hook 拦截过期索引的提交。**不要依赖自己记得去更新索引。**
+
 ### 批量任务必须并行
 维护管线的批量环节（embed / summarize / office 提取）已内置并发（`.env:MAINTAIN_CONCURRENCY`）。**你手工做批量维护（批量整理、迁移、打标、改写多个文件）时同样必须并行**：能并行派 subagent 的并行派发，能在一次响应里并行发多个工具调用的并行发——禁止逐文件串行循环。
 
@@ -31,6 +41,7 @@
 ### 第 0 步 · 环境自检
 - **主从自检**：写入前确认本机 hostname == `.env:PRIMARY_HOST`。不一致（从机）→ 进入受限写入模式（可新建/修改用户领地 .md 原文 + active plan；禁止改持久型文件、禁止跑维护脚本、禁止 git 写类命令）
 - **模型自检**：`python .meta/scripts/whoami.py` 确认实际 provider / model
+- **记忆检索**：读 `.meta/memory/MEMORY.md` + `python .meta/scripts/ask.py --scope memory "<任务关键词>"` 查过往经验（除非用户明确说不必要）
 
 ### 第 1 步 · 识别任务类型
 | 用户说... | 任务类型 | 执行 |
@@ -43,6 +54,7 @@
 | "审计" / "复审" | 执行后验收 | 回到对应 active plan 的 review，由 fresh verifier 验收 |
 
 ### 第 2 步 · 执行前自检
+- [ ] 我是否已检索记忆系统（MEMORY.md / ask.py --scope memory）？除非用户明确豁免 → **先查再动手**
 - [ ] 我是否准备写入用户原文？如果是且用户没明确要求 → **停止**
 - [ ] 我是否准备用 Grep 找内容？如果不是精确字符串 → **改用 ask.py**
 - [ ] 我是否准备逐文件串行处理一批文件？→ **改并行**（subagent / 并行工具调用）
@@ -60,6 +72,8 @@ python .meta/scripts/ask.py "query"             # 语义检索（低置信自动
 python .meta/scripts/ask.py --check "主题"      # 写前查重
 python .meta/scripts/ask.py --orphans           # 孤儿清单
 python .meta/scripts/ask.py --hybrid "query"    # BM25+Dense 混合检索
+python .meta/scripts/ask.py --scope memory "query"  # 记忆系统检索
+python .meta/scripts/memory_index.py            # 重建 MEMORY.md 记忆索引（索引硬约束）
 python .meta/scripts/synthesize.py --theme "主题" --scope "glob"  # 主题合成
 python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾检测）
 python .meta/scripts/whoami.py                  # 模型自检
@@ -102,5 +116,7 @@ bootstrap_phase: "phase0"        # 已完成到的 Phase（phase0/1/2/3）；每
 | `git push` / `reset --hard` / `rebase` | 等用户明确要求 |
 | 硬编码 API key | 走 `.env` |
 | 从机改持久型文件 / 跑维护脚本 | 由主机执行 |
+| 跳过记忆检索直接执行任务（用户未豁免） | 先读 MEMORY.md + `ask.py --scope memory` |
+| 手改 MEMORY.md 索引标记段 | 跑 `python .meta/scripts/memory_index.py` |
 | 未经 ultraverge 改治理文档 | 按 `.meta/converge/README.md` 走流程 |
 | 直接编辑 CLAUDE.md / GEMINI.md | 编辑 AGENTS.md 后跑 `python .meta/scripts/sync_agents.py`，三文件 MD5 自动校验 |

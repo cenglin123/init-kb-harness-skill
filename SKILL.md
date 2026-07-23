@@ -61,6 +61,11 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 2. **编排层并行**：maintain.py 把 embed 与 summarize 作为独立进程并行跑
 3. **agent 手工批量维护**：批量整理/迁移/打标/改写多文件时，**必须**并行派发（subagent 或一次响应内的并行工具调用），禁止逐文件串行循环——此准则同时写入目标仓库 AGENTS.md
 
+### 记忆系统双硬约束
+
+1. **任务执行前必查记忆**：目标仓库 AGENTS.md（`refs/agents-template.md`）必须包含硬要求——agent 接到任务后、执行前必须先检索记忆系统（读 `.meta/memory/MEMORY.md` 索引 + `ask.py --scope memory`），查看可能的过往经验；唯一豁免是用户当次明确说不必要。
+2. **MEMORY.md 索引脚本自动维护**：`scripts/memory_index.py` 扫描 `.meta/memory/{project,reference,user,workflows,feedback}/` 自动重建 MEMORY.md 索引标记段（`<!-- memory-index:start/end -->`，段内禁止手改），自动展示各分类当前全部条目。三层强制：maintain.py 每次维护自动重建 + pre-commit hook 拦截过期索引提交 + `--check` 模式供校验。**不允许依赖 agent 记得手动维护索引。**
+
 ### 三自循环 ↔ CONSTITUTION 第零部四目标
 
 本技能安装的三组机制对应知识库的四目标（CONSTITUTION 第零部原文：永无死角 / 不重复建设 / 自维护 / 知识复利）：
@@ -112,6 +117,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 ### Phase 2 · 自沉淀（必装）
 
 - 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（目录树与 MEMORY.md 自述一致：MEMORY.md + user/role.md + workflows/README.md + feedback/、project/、reference/ 空目录）
+- MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
 
 ### Phase 3 · 治理（必装）
@@ -173,6 +179,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 |------|------|
 | `common.py` | 公共库：env 加载 / API client（含跨线程全局限速）/ 扫描与排除 / office 与并发配置 / 链接解析 / git 包装 |
 | `sync_agents.py` | AGENTS.md → CLAUDE.md/GEMINI.md 三文件同步（MD5 校验） |
+| `memory_index.py` | MEMORY.md 记忆索引自动重建（硬约束，索引标记段禁止手改）；`--check` 供 pre-commit 校验 |
 | `detect_renames.py` | 重命名检测（git + hash 双通道），迁移伴生元数据 |
 | `check_sidecar_sources.py` | 校验/修复 `.meta/{summaries,links,tags}/` sidecar 的 source 字段 |
 | `inbox_scan.py` | 收件箱扫描 + LLM 归类建议（health_report 调用） |
@@ -226,7 +233,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 target-vault/
 ├── AGENTS.md / CLAUDE.md / GEMINI.md        ← 本技能模板（图书管理员准则 + 并行准则 + 维护管线）
 ├── .env                                      ← 从 env.example 填充
-├── .githooks/pre-commit                      ← 统一版 hook（plan status + converge 路径 + GOV 提醒 + key/隐私/MD5）
+├── .githooks/pre-commit                      ← 统一版 hook（plan status + converge 路径 + GOV 提醒 + key/隐私/MD5 + MEMORY.md 索引一致性）
 ├── docs/
 │   ├── STRUCTURE.md / plans/ / CURRENT.md    ← init-agent-docs 打底（若装）
 │   ├── CONSTITUTION.md                       ← 三元原则 + 持久性四型 + 多轴门控 + converge 生命周期

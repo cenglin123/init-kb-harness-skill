@@ -39,16 +39,23 @@ dream.py 按 half-life 衰减：workflow 半衰期 90 天、feedback dormant 180
 
 ## 当前记忆条目
 
-> Agent 维护时自动更新本段。新建记忆后在对应分类下追加一行。
+> **本段由 `.meta/scripts/memory_index.py` 自动维护（硬约束），禁止手改。**
+> 每次 `maintain.py` 运行时重建；pre-commit hook 校验索引与磁盘实际内容一致。
+> 新建/删除/重命名记忆文件后，直接运行 `python .meta/scripts/memory_index.py` 刷新。
 
-### feedback/
-- （待沉淀）
-
+<!-- memory-index:start -->
 ### project/
-- （待沉淀）
+- （暂无）
 
 ### reference/
-- （待沉淀）
+- （暂无）
+
+### user/
+- （暂无）
 
 ### workflows/
-- （Phase 2 安装后由 skill 写入可复用 workflow 模板）
+- （暂无）
+
+### feedback/
+- （暂无）
+<!-- memory-index:end -->
