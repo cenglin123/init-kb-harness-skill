@@ -206,7 +206,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `docs/CHANGELOG.md` | **追加不覆盖** | 历史记录 |
 | `.meta/converge/` `.meta/memory/` 内容 | **跳过若存在**（只补缺失的 README/骨架） | 持久型，含收敛证据与记忆 |
 | `.meta/office-extracts/` | 由 extract_office.py 按 hash 增量管理 | 派生型 |
-| `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；覆盖后跑 sync_agents.py） | 内联段含用户自由文本不可重建；其余为机械规则随模板 |
+| `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；legacy 旧版兼容直接覆盖为新模板，详见旧版兼容段；覆盖后跑 sync_agents.py） | 内联段含用户自由文本不可重建；其余为机械规则随模板 |
 
 ### bootstrap_phase 状态记录
 
@@ -225,6 +225,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 - 检测到旧版脚本 `maintain-lite.py` → 替换为 `maintain.py`，拷入全量脚本
 - `.meta/deliberations/` 或 audit 历史内容原地保留，在其 README 标注"只读证据归档，禁止新增"
 - 治理统一走 `.meta/converge/`
+- `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`：**覆盖前提示用户**——"检测到旧版 AGENTS.md，将被 v0.5+ 新模板覆盖（含「项目记忆」内联段占位符）；非内联段区域的用户定制将丢失（git 历史可恢复）；CLAUDE/GEMINI 存在则覆盖、不存在则随 AGENTS.md 新建"；确认后覆盖为新模板，按 Phase 2 流程填充内联段 + 跑 `sync_agents.py`。**覆盖安全依据**：旧版无内联段→不丢失内联段自由文本（独立第三场景，非 in_progress 语义）；非内联段区域按模板权威原则覆盖（幂等表理由栏）；不走 completed 升级流程的①备份③填回④迁移映射（旧版无内联段，跳过这三步）
 
 ---
 
