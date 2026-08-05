@@ -48,7 +48,7 @@ IF has_governance_docs:
 | 100-500 篇 | 5 | 20 | 3 |
 | > 500 篇 | 10 | 40 | 3 |
 
-## 输出格式（呈现于 Phase 0 决策点 ③ + 记录进 kb-bootstrap-plan.md）
+## 输出格式（呈现于 Phase 0 决策点 ③ + 记录进 kb-bootstrap-decisions.md）
 
 ```markdown
 ## 仓库画像

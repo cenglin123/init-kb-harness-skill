@@ -97,7 +97,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
    | ③ | 全量安装确认 | 仓库画像 + rubric 提示 + 参数阈值建议 | a) 确认全量安装（Phase 1+2+3）b) 极小仓库先攒内容、暂不 bootstrap |
    | ④ | API 配置 | env 字段清单（必填：DeepSeek/智谱 key；可选：PRIMARY_HOST） | a) 现在提供（贴入对话或用户自行编辑 .env）b) 稍后自填（骨架照装，LLM 步骤暂不可跑） |
 
-   每步的用户选择**记录进 `kb-bootstrap-plan.md`**（定位：**执行记录**——记下每步选项、选择结果、日期）。
+   每步的用户选择**记录进 `kb-bootstrap-decisions.md`**（定位：**执行记录**——记下每步选项、选择结果、日期）。
 6. **四个决策点全部有结果 → 直接进入 Phase 1**。中断后重触发时读 plan 中的决策记录，问用户"沿用历史决策 / 重新决策"。
 
 ### Phase 1 · 骨架 + 检索 + Office 提取（必装）
@@ -112,13 +112,13 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 6. **紧接着**跑 `python .meta/scripts/sync_agents.py`（生成 CLAUDE.md/GEMINI.md）——步骤 5+6 视为一个原子动作：中间中断会造成三文件 MD5 不一致、pre-commit hook 拦截提交；续装时检测到不一致先补跑 sync_agents.py
 7. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）
 
-> **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-plan.md`。
+> **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
 
 ### Phase 2 · 自沉淀（必装）
 
 - 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（目录树与 MEMORY.md 自述一致：MEMORY.md + user/role.md + workflows/README.md + feedback/、project/、reference/ 空目录）
 - MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
-- 填充 AGENTS.md 的「项目记忆」内联段：从 Phase 0 决策记录（kb-bootstrap-plan.md）提取 taxonomy 要点；活跃主题在 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好不在 Phase 0 决策范围内，需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）；替换 AGENTS.md 「项目记忆」段的占位符后跑 `sync_agents.py` 同步三文件
+- 填充 AGENTS.md 的「项目记忆」内联段：从 Phase 0 决策记录（kb-bootstrap-decisions.md）提取 taxonomy 要点；活跃主题在 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好不在 Phase 0 决策范围内，需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）；替换 AGENTS.md 「项目记忆」段的占位符后跑 `sync_agents.py` 同步三文件
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
 
 ### Phase 3 · 治理（必装）
@@ -135,7 +135,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 3. **人审门（交互式）**：agent 引导用户用 ask.py 跑一条真实问题检索（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
 4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`、`bootstrap_phase` 改 `phase3`，填 `bootstrap_completed_at: <date>`，**重跑 `sync_agents.py`**（任何 AGENTS.md 改动都必须重跑，否则三文件 MD5 漂移、pre-commit hook 拦死后续 commit）
 
-> **API key 未配置时不得标 completed**：Phase 0 决策点 ④ 选了"稍后自填"的仓库，`maintain.py --full` 的 LLM 步骤必然失败——保持 `in_progress` 并在 kb-bootstrap-plan.md 注明阻塞原因，key 配好后重跑完成判定。
+> **API key 未配置时不得标 completed**：Phase 0 决策点 ④ 选了"稍后自填"的仓库，`maintain.py --full` 的 LLM 步骤必然失败——保持 `in_progress` 并在 kb-bootstrap-decisions.md 注明阻塞原因，key 配好后重跑完成判定。
 
 > **诚实标注**：maturity-rubric 的画像提示全部机械可判；bootstrap 完成判定含一次人审门（用户确认检索质量）——前者是信息呈现、后者决定体系是否就绪。
 
@@ -212,11 +212,13 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 `bootstrap_phase` 是**断点记录**（非解锁门控），枚举 ∈ `{phase0, phase1, phase2, phase3}`，表示"已完成到哪个 Phase"。全部完成 = `phase3` + `bootstrap_status: completed`。
 
-重复触发本技能时，先读目标仓库 AGENTS.md 的 `bootstrap_status` 与 `bootstrap_phase`：
+重复触发本技能时：
+0. **先检测仓库根是否存在旧名 `kb-bootstrap-plan.md`**（v0.5.7 前生成）→ 存在则重命名为 `kb-bootstrap-decisions.md`（决策记录不丢，仅文件名变更）
+1. 读目标仓库 AGENTS.md 的 `bootstrap_status` 与 `bootstrap_phase`，按下方分支处理：
 - `bootstrap_status: in_progress` → 从 `bootstrap_phase` 的下一个 Phase 续装
 - `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"；若升级 bundle 脚本，AGENTS.md 按幂等表"条件覆盖"处理：① 读旧 AGENTS.md 的「项目记忆」内联段已填内容并备份；② 用新模板覆盖 AGENTS.md；③ 把备份内联段填回新模板对应位置（勿重置为占位符）；④ 若新模板内联段结构跨版本变更（增删字段/改名），须显式给出迁移映射，不能机械填回；⑤ 跑 sync_agents.py 同步 CLAUDE/GEMINI
 - 无 `bootstrap_status` 字段（首次）→ 从 Phase 0 开始
-- 已存在 `kb-bootstrap-plan.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
+- 已存在 `kb-bootstrap-decisions.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
 
 ### 旧版兼容
 
@@ -250,7 +252,7 @@ target-vault/
 │   └── rules/
 │       ├── category-privacy.md               ← Phase 0 嗅探结果（模板：templates/category-privacy.md）
 │       └── retrieval.md                      ← ask.py 优先
-└── kb-bootstrap-plan.md                      ← Phase 0 决策记录（交互引导各步的选择与结果）
+└── kb-bootstrap-decisions.md                      ← Phase 0 决策记录（交互引导各步的选择与结果）
 ```
 
 ---
@@ -270,6 +272,6 @@ target-vault/
 ## 触发后的第一步
 
 收到触发指令后，**先读**：
-1. 目标仓库根是否有 `.meta/scripts/`（已装？旧版 maintain-lite？）、是否有 `kb-bootstrap-plan.md`（历史决策记录？）
+1. 目标仓库根是否有 `.meta/scripts/`（已装？旧版 maintain-lite？）、是否有 `kb-bootstrap-decisions.md`（历史决策记录？）
 2. `refs/maturity-rubric.md` + `refs/privacy-scan.patterns` + `refs/taxonomy-inference.prompt`
 3. 然后从 Phase 0 开始（扫描 → 分步交互引导用户决策）。

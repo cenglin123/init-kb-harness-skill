@@ -25,7 +25,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ### 前置：Phase 0（由技能触发，read-only 体检 + 交互式引导）
 
-在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + 仓库画像，含 office 文档统计），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 全量安装确认 / API 配置四个决策点逐个给出选项供选择，选择结果记录进 `kb-bootstrap-plan.md`（执行记录）。全部决策完成即进 Phase 1。
+在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + 仓库画像，含 office 文档统计），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 全量安装确认 / API 配置四个决策点逐个给出选项供选择，选择结果记录进 `kb-bootstrap-decisions.md`（执行记录）。全部决策完成即进 Phase 1。
 
 ### Phase 1→2→3（机械安装，一次完成）
 
@@ -67,7 +67,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 | Phase | 性质 | 装什么 |
 |-------|------|--------|
-| **0** | read-only 体检 + 交互引导 | 分步决策引导（隐私 / taxonomy / 全量确认 / API），决策记录进 `kb-bootstrap-plan.md` |
+| **0** | read-only 体检 + 交互引导 | 分步决策引导（隐私 / taxonomy / 全量确认 / API），决策记录进 `kb-bootstrap-decisions.md` |
 | **1** | 骨架 + 检索 + office 提取 | 全量脚本集（maintain.py 完整管线 + extract_office/embed/summarize/index/graph/bm25/knowledge_map/health/ask/whoami 等）+ AGENTS.md + pre-commit |
 | **2** | 自沉淀 | memory 结构（MEMORY.md + role + workflows）；dream/synthesize/semantic_lint 脚本已随 Phase 1 拷入 |
 | **3** | 治理 | `.meta/converge/` charter（**唯一治理目录**，converge + fresh verifier 单一生命周期）+ governed-files SSOT + CONVERGE_DIR 绑定 |
@@ -86,10 +86,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ### 延后清理项
 
-> v0.4.1 converge 审计后的 LOW 级残留。脚本 docstring 沉积已清（v0.5.5）；治理文档措辞（callout 辩护色彩 + 否定式/minimizer）已清（v0.5.6）；maintain-lite 引用经重新评估为合法检测标志（非残留）；constitution-template 反补丁感内容已随 v0.4.1 消失（obsolete）。剩余项为高成本评估。
-
-**SKILL.md**
-- `kb-bootstrap-plan.md` 文件名与"决策记录/执行记录"定位错位（v0.3 提出；改名需全局替换 + 评估既有仓库兼容，高成本）
+> v0.4.1 converge 审计后的 LOW 级残留**已全部处理**：脚本 docstring（v0.5.5）、治理文档措辞（v0.5.6）、kb-bootstrap-plan → kb-bootstrap-decisions 改名（v0.5.7）；maintain-lite 引用经重新评估为合法检测标志（非残留）；constitution-template 反补丁感内容已随 v0.4.1 消失（obsolete）。本段保留作为历史记录。
 
 ---
 
