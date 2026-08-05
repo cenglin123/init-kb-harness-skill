@@ -14,7 +14,7 @@
 │   └── role.md            # 用户画像（用户直接编辑；Agent 追加不覆盖）
 ├── feedback/              # 反馈记忆（用户偏好/纠正，带衰减）
 ├── project/               # 项目记忆（进行中项目的上下文）
-├── reference/             # 外部参考（论文/文章摘要等）
+├── reference/             # 外部参考（论文/文章摘要）+ 运维踩坑（type: pitfall）
 └── workflows/             # 可复用任务流程
     └── README.md
 ```
@@ -25,6 +25,7 @@
 - **不记录**：可从代码/git log/笔记原文推导的事实；一次性会话细节；与日常协作无关的临时任务状态
 - **更新时必须更新 frontmatter 的 `last_updated` / `generated_at`**
 - **衰减**：dream.py（Phase 2）定期扫描，长期未确认/未触达的记忆降级或归档
+- **维护踩坑归宿**：维护过程踩坑（脚本失败 / API 限流 / 编码陷阱 / 索引损坏等）归入 `reference/`，frontmatter 标 `type: pitfall` + `severity: high|med|low`；检索层（ask.py --scope memory）已覆盖 reference/，无需独立目录
 
 ## 活性状态（dream.py 维护）
 

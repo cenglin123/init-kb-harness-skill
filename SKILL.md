@@ -118,6 +118,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 - 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（目录树与 MEMORY.md 自述一致：MEMORY.md + user/role.md + workflows/README.md + feedback/、project/、reference/ 空目录）
 - MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
+- 填充 AGENTS.md 的「项目记忆」内联段：从 Phase 0 决策记录（kb-bootstrap-plan.md）提取用户称呼、关键偏好、taxonomy 要点、当前 Phase，写入 agents-template 生成的 AGENTS.md 对应占位符；填充后跑 `sync_agents.py` 同步三文件
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
 
 ### Phase 3 · 治理（必装）
