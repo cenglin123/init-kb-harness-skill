@@ -187,7 +187,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `changelog_append.py` | CHANGELOG 条目脚本化插入 |
 | `check_plan_status.py` | docs/plans 路径与 frontmatter status 一致性（pre-commit 调用） |
 
-> maintain.py 的 workflow frequency 步骤依赖 `search_sessions.py`（作者 vault 特化件，bundle 不含）——缺失时自动跳过并告警，属预期降级。
+> maintain.py 的 workflow frequency 步骤依赖 `search_sessions.py`（vault 特化脚本，bundle 不含）——缺失时自动跳过并告警。
 
 ---
 

@@ -86,14 +86,10 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ### 延后清理项
 
-> v0.4.1 converge 审计后的 LOW 级残留。脚本 docstring 沉积已清（v0.5.5）；maintain-lite 引用经重新评估为合法检测标志（非残留）；constitution-template 反补丁感内容已随 v0.4.1 清理消失（obsolete）。剩余项需 converge 或高成本评估。
+> v0.4.1 converge 审计后的 LOW 级残留。脚本 docstring 沉积已清（v0.5.5）；治理文档措辞（callout 辩护色彩 + 否定式/minimizer）已清（v0.5.6）；maintain-lite 引用经重新评估为合法检测标志（非残留）；constitution-template 反补丁感内容已随 v0.4.1 消失（obsolete）。剩余项为高成本评估。
 
 **SKILL.md**
-- §支撑脚本 callout「作者 vault 特化件」「属预期降级」——外部参照 + 辩护色彩，改中性陈述
 - `kb-bootstrap-plan.md` 文件名与"决策记录/执行记录"定位错位（v0.3 提出；改名需全局替换 + 评估既有仓库兼容，高成本）
-
-**refs/**
-- `maturity-rubric.md:67` `非门控` —— 否定式家族残留（改"建议性"更中性）
 
 ---
 
