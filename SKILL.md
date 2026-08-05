@@ -118,7 +118,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 - 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（目录树与 MEMORY.md 自述一致：MEMORY.md + user/role.md + workflows/README.md + feedback/、project/、reference/ 空目录）
 - MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
-- 填充 AGENTS.md 的「项目记忆」内联段：从 Phase 0 决策记录（kb-bootstrap-plan.md）提取 taxonomy 要点与当前 Phase；用户称呼 / 关键偏好不在 Phase 0 决策范围内，需向用户补问一句后填入（勿留占位符、勿臆造）；替换 AGENTS.md 「项目记忆」段的占位符后跑 `sync_agents.py` 同步三文件
+- 填充 AGENTS.md 的「项目记忆」内联段：从 Phase 0 决策记录（kb-bootstrap-plan.md）提取 taxonomy 要点；活跃主题在 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好不在 Phase 0 决策范围内，需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）；替换 AGENTS.md 「项目记忆」段的占位符后跑 `sync_agents.py` 同步三文件
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
 
 ### Phase 3 · 治理（必装）
@@ -206,7 +206,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `docs/CHANGELOG.md` | **追加不覆盖** | 历史记录 |
 | `.meta/converge/` `.meta/memory/` 内容 | **跳过若存在**（只补缺失的 README/骨架） | 持久型，含收敛证据与记忆 |
 | `.meta/office-extracts/` | 由 extract_office.py 按 hash 增量管理 | 派生型 |
-| `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **覆盖**（覆盖后立即跑 sync_agents.py；重跑先查 MD5，不一致只补跑同步） | 由 AGENTS 模板生成；中断会致三文件漂移 |
+| `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；覆盖后跑 sync_agents.py） | 内联段含用户自由文本不可重建；其余为机械规则随模板 |
 
 ### bootstrap_phase 状态记录
 
@@ -214,7 +214,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 重复触发本技能时，先读目标仓库 AGENTS.md 的 `bootstrap_status` 与 `bootstrap_phase`：
 - `bootstrap_status: in_progress` → 从 `bootstrap_phase` 的下一个 Phase 续装
-- `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"
+- `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"；若升级 bundle 脚本，AGENTS.md 按幂等表"条件覆盖"处理：① 读旧 AGENTS.md 的「项目记忆」内联段已填内容并备份；② 用新模板覆盖 AGENTS.md；③ 把备份内联段填回新模板对应位置（勿重置为占位符）；④ 若新模板内联段结构跨版本变更（增删字段/改名），须显式给出迁移映射，不能机械填回；⑤ 跑 sync_agents.py 同步 CLAUDE/GEMINI
 - 无 `bootstrap_status` 字段（首次）→ 从 Phase 0 开始
 - 已存在 `kb-bootstrap-plan.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
 
