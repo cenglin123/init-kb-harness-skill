@@ -25,7 +25,7 @@
 - **不记录**：可从代码/git log/笔记原文推导的事实；一次性会话细节；与日常协作无关的临时任务状态
 - **更新时必须更新 frontmatter 的 `last_updated` / `generated_at`**
 - **衰减**：dream.py（Phase 2）定期扫描，长期未确认/未触达的记忆降级或归档
-- **维护踩坑归宿**：维护过程踩坑（脚本失败 / API 限流 / 编码陷阱 / 索引损坏等）归入 `reference/`，frontmatter 标 `type: pitfall` + `severity: high|med|low`；检索层（ask.py --scope memory）已覆盖 reference/，无需独立目录
+- **维护踩坑归宿**：维护过程踩坑（反复出现 / 有通用教训的脚本失败 / API 限流 / 编码陷阱 / 索引损坏等；一次性偶发失败不记录）归入 `reference/`，frontmatter 标 `type: pitfall` + `severity: high|med|low`；检索层（ask.py --scope memory）已覆盖 reference/，无需独立目录。**已知限制**：dream.py 衰减不感知 `severity`，高严重度且少被复引的踩坑会随时间沉睡——`severity` 当前仅作标记，未来可扩展为 dream.py 豁免依据
 
 ## 活性状态（dream.py 维护）
 
