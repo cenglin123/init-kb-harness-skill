@@ -86,21 +86,14 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ### 延后清理项
 
-> v0.4.1 converge 审计（commit `a85af66`）后的 LOW 级残留，下次 bundle drift 维护时顺手清。**清完即删对应条目**；全部清空后整个子段也可删。重新审计前先读本段，避免重复发现。
+> v0.4.1 converge 审计后的 LOW 级残留。脚本 docstring 沉积已清（v0.5.5）；maintain-lite 引用经重新评估为合法检测标志（非残留）；constitution-template 反补丁感内容已随 v0.4.1 清理消失（obsolete）。剩余项需 converge 或高成本评估。
 
 **SKILL.md**
 - §支撑脚本 callout「作者 vault 特化件」「属预期降级」——外部参照 + 辩护色彩，改中性陈述
-- `maintain-lite.py` 残留引用（§旧版兼容 / §触发后的第一步）：与 §旧版兼容 子节叙述重复，可压缩
-- `kb-bootstrap-plan.md` 文件名与"决策记录/执行记录"定位错位（v0.3 提出、v0.4 未处理；如要改名，需重新普查 v0.4 当前引用基线 + 评估既有用户仓库兼容）
+- `kb-bootstrap-plan.md` 文件名与"决策记录/执行记录"定位错位（v0.3 提出；改名需全局替换 + 评估既有仓库兼容，高成本）
 
 **refs/**
-- `maturity-rubric.md:67` `非门控` —— 否定式家族残留
-- `constitution-template.md:74` 反补丁感政策嵌进用户运行时文档（元层级错位，可移至本维护者段）
-
-**scripts/ docstring 沉积**
-- `sync_agents.py`：「新增」版本词 + `GOV_PATTERNS` 措辞（已被 `.meta/governed-files.txt` SSOT 取代，核对后更正）
-- `whoami.py`：「（实测：cc-switch.db 残留…）」调试残片，删
-- `dream.py`：`FEEDBACK_STABLE_CONFIRMATIONS` 注释「当前复用可行 / 未来若需…」前瞻脚手架，删
+- `maturity-rubric.md:67` `非门控` —— 否定式家族残留（改"建议性"更中性）
 
 ---
 

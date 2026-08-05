@@ -27,8 +27,7 @@ Provider 识别分两层：
          profile/.env 泄漏到 opencode 子进程造成假阳性（详见 detect_harness() 设计说明）。
          opencode 命中后**独占**——一旦判定为 opencode，main() 不再读 cc-switch /
          .claude/settings.json / ANTHROPIC_* env，避免 Claude Code 残留状态在 opencode
-         会话内假阳性（实测：cc-switch.db 残留会导致 opencode 会话被误判为
-         deepseek-v4-pro[1M]）。
+         会话内假阳性。
 
   Layer 2 · 各 harness 内部 Provider 识别：
     codex：

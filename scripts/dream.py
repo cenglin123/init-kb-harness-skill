@@ -27,7 +27,7 @@ WORKFLOW_BORDERLINE_FREQ = 0.03    # 临界区间下限
 
 FEEDBACK_DORMANT_DAYS = 180        # active→dormant：180d 无确认
 FEEDBACK_ARCHIVE_DAYS = 365        # dormant→archive：365d 无确认
-FEEDBACK_STABLE_CONFIRMATIONS = 3  # 双语义：同时服务 (a) STABLE 信号（健康保留，dream 原义）+ (b) 晋升阈值（建议内化，晋升候选段派生条件）。当前复用可行；未来若需独立调整晋升阈值，引入 PROMOTION_CONFIRMATIONS
+FEEDBACK_STABLE_CONFIRMATIONS = 3  # 双语义：(a) STABLE 信号（健康保留，dream 原义）(b) 晋升阈值（建议内化，晋升候选段派生条件）
 
 PROJECT_STALE_DAYS = 90            # complete 项目 >90d → STALE
 

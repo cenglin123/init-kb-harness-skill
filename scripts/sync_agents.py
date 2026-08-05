@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """同步 AGENTS.md 到 CLAUDE.md / GEMINI.md，并校验 MD5。
-新增 --check-gov-consistency 子命令校验治理文档三方一致性（SSOT / AGENTS 明线 / hook GOV_PATTERNS）。
+--check-gov-consistency 子命令校验治理文档三方一致性（SSOT / AGENTS 明线 / hook GOV_PATTERNS）。
 """
 
 import argparse
