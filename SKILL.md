@@ -114,6 +114,22 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 > **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
 
+### Phase 1.5 · 宿主护栏（可选，用户确认后装）
+
+把本库已声明的**机械路径规则**硬化到宿主动作侧：隐私目录读禁、从机写禁、CHANGELOG/同步副本编辑重定向、compact 哨兵注入、触发词检索提醒。**护栏只拦机械路径规则，不拦判断**；状态侧（pre-commit）仍是地基，本层是加固而非替代，软规则原文保留。
+
+**前提**：Phase 1 已装（`host_guard.py` 随脚本集落位）；Phase 0 隐私目录已经用户确认。
+
+1. **宿主探测**：检测本机实际使用的 agent 宿主（opencode / Claude Code / Codex / 其他），逐个向用户确认后只生成对应适配；一个都不使用则跳过本 Phase。
+2. **策略落盘**：`templates/host-write-policy.json` → `.meta/rules/host-write-policy.json`。目标库 AGENTS.md 若已有演进版从机禁改清单，以该清单为准转写，不用模板覆盖。
+3. **按宿主生成适配**（全部指向同一脚本 `.meta/scripts/host_guard.py`，单一策略源）：
+   - **opencode**：`templates/host-guardrails/opencode.json` → 项目根 `opencode.json`（已存在则只合并 `permission` 段）；`templates/host-guardrails/kb-guard.js` → `.opencode/plugins/kb-guard.js`
+   - **Claude Code**：`templates/host-guardrails/claude-settings-fragment.json` 合并进 `.claude/settings.json`（保留既有 `permissions.allow` 等全部键，追加 `deny` 与 `hooks`）
+   - **Codex**：`templates/host-guardrails/codex-hooks.json` → `.codex/hooks.json`；提示用户需在 Codex `/hooks` 审查信任后生效
+   - **其他宿主**：无适配则如实保持软约束，不伪造覆盖
+4. **验证**：`python .meta/scripts/host_guard.py compact-context` 输出 SessionStart JSON；`simulate-host` 模拟从机判定；构造隐私路径 payload 实测 deny/allow（用例形态参考 vault 侧 `.meta/tests/test_host_guard.py`）。
+5. **登记**：AGENTS.md 写明哪些宿主已接线、哪些仍软约束（compact 哨兵段措辞绑定实测结果，实测失败的宿主保持"技术债"原措辞），然后跑 `sync_agents.py`。
+
 ### Phase 2 · 自沉淀（必装）
 
 - 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（目录树与 MEMORY.md 自述一致：MEMORY.md + user/role.md + workflows/README.md + feedback/、project/、reference/ 空目录）
@@ -183,6 +199,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `memory_index.py` | MEMORY.md 记忆索引自动重建（硬约束，索引标记段禁止手改）；`--check` 供 pre-commit 校验 |
 | `detect_renames.py` | 重命名检测（git + hash 双通道），迁移伴生元数据 |
 | `check_sidecar_sources.py` | 校验/修复 `.meta/{summaries,links,tags}/` sidecar 的 source 字段 |
+| `host_guard.py` | 宿主护栏动态门禁（**Phase 1.5 选用**，不配 hook 则为无害闲置）：pre-tool 判定（隐私读禁/从机写禁/编辑重定向）、prompt 触发词提醒、compact-context 注入文本、simulate-host dry-run；策略源 `.meta/rules/host-write-policy.json` |
 | `inbox_scan.py` | 收件箱扫描 + LLM 归类建议（health_report 调用） |
 | `changelog_append.py` | CHANGELOG 条目脚本化插入 |
 | `check_plan_status.py` | docs/plans 路径与 frontmatter status 一致性（pre-commit 调用） |
@@ -204,6 +221,9 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `.meta/governed-files.txt` | **跳过若存在** | 用户可能已按本仓库边界增删 |
 | `docs/TAXONOMY.md` | **跳过若存在** | Phase 0 推断 + 用户确认 |
 | `docs/CHANGELOG.md` | **追加不覆盖** | 历史记录 |
+| `.meta/rules/host-write-policy.json` | **跳过若存在** | 用户可能已按本仓库边界增删（Phase 1.5） |
+| 宿主配置文件（`opencode.json` / `.claude/settings.json` / `.codex/hooks.json`） | **合并式更新** | 保留既有权限/hook 规则，只补缺失段（Phase 1.5） |
+| `.opencode/plugins/kb-guard.js` | **覆盖** | 以 skill bundle 为准（Phase 1.5） |
 | `.meta/converge/` `.meta/memory/` 内容 | **跳过若存在**（只补缺失的 README/骨架） | 持久型，含收敛证据与记忆 |
 | `.meta/office-extracts/` | 由 extract_office.py 按 hash 增量管理 | 派生型 |
 | `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；legacy 旧版兼容直接覆盖为新模板，详见旧版兼容段；覆盖后跑 sync_agents.py） | 内联段含用户自由文本不可重建；其余为机械规则随模板 |
@@ -244,14 +264,16 @@ target-vault/
 │   ├── TAXONOMY.md                           ← Phase 0 推断（draft）
 │   └── CHANGELOG.md                          ← 首条 bootstrap 记录
 ├── .meta/
-│   ├── scripts/                              ← 全量脚本集（见脚本清单）
+│   ├── scripts/                              ← 全量脚本集（见脚本清单；host_guard.py 随集落位，Phase 1.5 接线启用）
 │   ├── office-extracts/                      ← office 文档提取 sidecar（派生型）
 │   ├── memory/                               ← MEMORY.md + user/role.md + workflows/ 等（Phase 2）
 │   ├── converge/{active,done}/ + README.md   ← 治理（Phase 3，唯一治理目录）
 │   ├── governed-files.txt                    ← 治理文档机械 SSOT
 │   └── rules/
 │       ├── category-privacy.md               ← Phase 0 嗅探结果（模板：templates/category-privacy.md）
-│       └── retrieval.md                      ← ask.py 优先
+│       ├── retrieval.md                      ← ask.py 优先
+│       └── host-write-policy.json            ← Phase 1.5（可选）：从机禁改清单机器可读 SSOT
+├── opencode.json / .claude/settings.json / .codex/hooks.json / .opencode/plugins/kb-guard.js   ← Phase 1.5（可选）：按宿主探测生成的动作侧护栏适配
 └── kb-bootstrap-decisions.md                      ← Phase 0 决策记录（交互引导各步的选择与结果）
 ```
 
@@ -266,6 +288,7 @@ target-vault/
 5. **API 后端**：默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算；DeepSeek 发布新代时升级为该代次等型号，并同步 `templates/env.example` 与 `common.py` 默认值。
 6. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
 7. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
+8. **宿主护栏边界**：Phase 1.5 的护栏只拦机械路径规则（隐私目录、从机禁改清单、编辑重定向），不拦判断类规则（如检索策略选择）；它是状态侧（pre-commit）的加固层而非替代，软规则原文保留；各宿主 fail-open/fail-closed 行为以 `host_guard.py` docstring 与接线文件注释为准，不宣称为安全边界。
 
 ---
 

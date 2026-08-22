@@ -1,0 +1,40 @@
+{
+  "description": "知识库宿主动作侧护栏（init-kb-harness Phase 1.5；需在 Codex /hooks 中审查信任后生效）",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|apply_patch|Read|Grep|Bash|read_file|write_file|str_replace_editor|create",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .meta/scripts/host_guard.py pre-tool --host codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .meta/scripts/host_guard.py prompt --host codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .meta/scripts/host_guard.py compact-context",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

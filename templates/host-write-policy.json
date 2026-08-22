@@ -1,0 +1,70 @@
+{
+  "$schema": "host-write-policy-v1",
+  "_comment": "从机禁改清单机器化 SSOT。primary_host 实际值运行时从 .env:PRIMARY_HOST 读取，此处仅为示例。",
+  "primary_host": "YOUR-PRIMARY-HOSTNAME",
+  "deny_rules": [
+    {
+      "name": "baseline-persistent",
+      "type": "reference",
+      "ref": "docs/CONSTITUTION.md#第六部·持久型文件清单",
+      "reason": "基线禁改范围：持久型文件清单所列全部文件，详见上位法"
+    },
+    {
+      "name": "runtime-scripts",
+      "type": "path_only",
+      "paths": [".meta/scripts/**", ".env*", ".git*", ".githooks/**"],
+      "reason": "运行时补充禁改"
+    },
+    {
+      "name": "plans-readme-and-archive",
+      "type": "path_only",
+      "paths": ["docs/plans/README.md", "docs/plans/done/**", "docs/plans/not_planned/**"],
+      "reason": "已完成/未采纳计划禁改 + plans 生命周期合同"
+    },
+    {
+      "name": "plans-active-others",
+      "type": "permission_qualified",
+      "path_pattern": "docs/plans/active/**",
+      "activate_when": "is_primary == false",
+      "allow_when": {
+        "source_equals": "agent-secondary",
+        "host_equals_current": true
+      },
+      "default_decision": "deny",
+      "reason": "从机自建 plan 可改（source=agent-secondary 且 host=当前 hostname）；其余（source 非 agent-secondary / host 非当前 / 无 frontmatter / 主机）→ deny；字段缺失 fail-closed deny"
+    },
+    {
+      "name": "agent-docs",
+      "type": "path_only",
+      "paths": [".meta/docs/**", ".meta/README.md", ".meta/rules/**", ".meta/converge/README.md", ".meta/audit/README.md"],
+      "reason": "Agent 文档禁改"
+    },
+    {
+      "name": "edge-cases",
+      "type": "path_only",
+      "paths": [".meta/.archive/**", ".meta/syntheses-status/**", ".meta/deliberations/**", ".meta/tests/**", ".claude/settings*.json"],
+      "reason": "边缘补充禁改"
+    },
+    {
+      "name": "derived-data",
+      "type": "path_only",
+      "paths": [
+        ".meta/summaries/**", ".meta/links/**", ".meta/tags/**", ".meta/syntheses/**",
+        ".meta/embeddings.sqlite", ".meta/graph.json",
+        ".meta/health-*.md", ".meta/orphans.md", ".meta/broken-links.md", ".meta/broken-links-ignore.md",
+        ".meta/knowledge-map.md", ".meta/semantic-lint-report.md",
+        ".meta/inbox-suggestions.json", ".meta/file-dates.json",
+        ".index/**"
+      ],
+      "reason": "派生数据禁改"
+    },
+    {
+      "name": "guardrail-files",
+      "type": "path_only",
+      "paths": ["opencode.json", ".codex/hooks.json", ".opencode/plugins/**"],
+      "reason": "护栏文件本体保护——宿主 hook/权限配置禁改"
+    }
+  ],
+  "privacy_dirs": ["000【备忘录*/**"],
+  "_privacy_sync": "须与 `.meta/rules/category-privacy.md` 的 scope/规则保持同步；扩展隐私目录时两处同步更新"
+}

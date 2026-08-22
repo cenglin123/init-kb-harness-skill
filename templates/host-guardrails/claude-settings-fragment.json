@@ -1,0 +1,48 @@
+{
+  "_comment": "合并片段：并入目标 vault 的 .claude/settings.json（保留既有 permissions.allow 等全部键；deny 与 hooks 不存在则新建、存在则按事件追加）。privacy 路径模式须与本库 .meta/rules/category-privacy.md 一致。",
+  "permissions": {
+    "deny": [
+      "Read(./000【备忘录*/**)",
+      "Grep(./000【备忘录*/**)",
+      "Edit(./000【备忘录*/**)",
+      "Write(./000【备忘录*/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Read|Grep|Bash|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .meta/scripts/host_guard.py pre-tool --host claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .meta/scripts/host_guard.py prompt --host claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .meta/scripts/host_guard.py compact-context",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "_comment": "opencode 权限片段：目标库无 opencode.json 时直接新建为本文件；已存在则只合并 permission 段（保留既有键）。privacy 路径模式须与 .meta/rules/category-privacy.md 一致。opencode 的 edit 覆盖 edit/write/patch；glob 保持允许（列路径不禁）。",
+  "permission": {
+    "read": { "000【备忘录*/**": "deny" },
+    "edit": { "000【备忘录*/**": "deny" }
+  }
+}

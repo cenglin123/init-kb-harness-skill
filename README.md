@@ -68,7 +68,8 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 | Phase | 性质 | 装什么 |
 |-------|------|--------|
 | **0** | read-only 体检 + 交互引导 | 分步决策引导（隐私 / taxonomy / 全量确认 / API），决策记录进 `kb-bootstrap-decisions.md` |
-| **1** | 骨架 + 检索 + office 提取 | 全量脚本集（maintain.py 完整管线 + extract_office/embed/summarize/index/graph/bm25/knowledge_map/health/ask/whoami 等）+ AGENTS.md + pre-commit |
+| **1** | 骨架 + 检索 + office 提取 | 全量脚本集（maintain.py 完整管线 + extract_office + dream/semantic_lint/synthesize/knowledge_map/bm25_index）+ AGENTS.md + pre-commit |
+| **1.5** | 可选·宿主护栏 | 宿主探测 → `.meta/rules/host-write-policy.json` 策略落盘 → 按宿主生成适配（opencode 权限+插件 / Claude settings 合并 / Codex hooks.json）→ 实测验证；只拦机械路径规则，不拦判断（详见 SKILL.md） |
 | **2** | 自沉淀 | memory 结构（MEMORY.md + role + workflows）；dream/synthesize/semantic_lint 脚本已随 Phase 1 拷入 |
 | **3** | 治理 | `.meta/converge/` charter（**唯一治理目录**，converge + fresh verifier 单一生命周期）+ governed-files SSOT + CONVERGE_DIR 绑定 |
 
