@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bm25_index.py — BM25 稀疏索引构建与查询
+bm25_index.py — BM25 稀疏索引构建与查询（零 API、零外部依赖）
+
+数据源：直接扫描 vault 语料（用户笔记 + office 提取 sidecar + memory，
+经 common.scan_indexable_notes），按 embed.chunk_text 相同规则分块。
+不依赖 embeddings.sqlite——简化版（lite）默认安装即可用。
 
 用法:
-    python .meta/scripts/bm25_index.py --build      # 从 embeddings.sqlite 全量重建 BM25 索引
+    python .meta/scripts/bm25_index.py --build      # 扫描语料全量重建 BM25 索引
     python .meta/scripts/bm25_index.py --query "xxx" --top-k 10  # BM25 检索
 """
 
-import sys, json, sqlite3, argparse, re, gzip, os, tempfile
+import sys, json, argparse, re, gzip, os, tempfile
 from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT
+from common import VAULT_ROOT, scan_indexable_notes, rel_path
+from embed import chunk_text
 
-DB_PATH = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
 BM25_INDEX_PATH = VAULT_ROOT / '.meta' / 'bm25_index.json.gz'
 
 # Simple BM25 implementation (avoid external dependency issues on Windows)
@@ -61,16 +65,22 @@ def tokenize(text):
     return result
 
 
-def build_index():
-    """从 embeddings.sqlite 读取所有 chunk，构建 BM25 索引"""
-    if not DB_PATH.exists():
-        print("错误：embeddings.sqlite 不存在，请先运行维护", file=sys.stderr)
-        sys.exit(1)
+def _iter_corpus_chunks():
+    """扫描语料并分块，产出 (path, chunk_index, chunk_text)。"""
+    for md in scan_indexable_notes(scope='all'):
+        rel = rel_path(md)
+        try:
+            content = md.read_text(encoding='utf-8')
+        except Exception as e:
+            print(f"  [skip] 无法读取: {rel} ({e})", file=sys.stderr)
+            continue
+        for idx, chunk in enumerate(chunk_text(content)):
+            yield rel, idx, chunk
 
+
+def build_index():
+    """直接扫描 vault 语料（笔记 + office 提取件 + memory），构建 BM25 索引"""
     start = datetime.now()
-    db = sqlite3.connect(str(DB_PATH))
-    rows = db.execute("SELECT path, chunk_index, chunk_text FROM embeddings").fetchall()
-    db.close()
 
     # First pass: tokenize all docs, build term->id mapping and doc frequencies
     term_to_id = {}
@@ -81,7 +91,7 @@ def build_index():
     docs_raw_terms = []  # list of {term_id: freq} per doc
     total_dl = 0
 
-    for path, chunk_idx, text in rows:
+    for path, chunk_idx, text in _iter_corpus_chunks():
         tokens = tokenize(text)
         term_freqs = {}
         for t in tokens:
@@ -101,7 +111,10 @@ def build_index():
             doc_freqs[tid] = doc_freqs.get(tid, 0) + 1
 
     N = len(docs_paths)
-    avgdl = total_dl / max(N, 1)
+    if N == 0:
+        print("⚠️  语料为空（无笔记 / office 提取件 / memory），BM25 索引未生成。")
+        return
+    avgdl = total_dl / N
 
     # Compute IDF for each term (as list indexed by term_id)
     num_terms = len(term_to_id)

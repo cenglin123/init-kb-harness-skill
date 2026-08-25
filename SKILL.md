@@ -1,11 +1,30 @@
 ---
 name: init-kb-harness
-description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Scaffolds maintenance pipeline (parallel batch jobs) + semantic retrieval (md + docx/xlsx/pptx/pdf extraction) + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Not for vaults that already have a `.meta/scripts/` harness.
+description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Default install is the simplified (lite) mode — zero API / zero embedding database; retrieval via agentic grep/glob + local BM25 + graph/backlinks. Full mode (Zhipu embeddings + DeepSeek summarize/rerank) is an opt-in upgrade. Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Not for vaults that already have a `.meta/scripts/` harness.
 ---
 
 # init-kb-harness · 知识库 Harness 引导器
 
 给**任意** Obsidian 仓库（含不健全/空仓库、office 文档为主的仓库）从零建立一套可自维护、自沉淀、自运行的 harness 框架。**Phase 1→2→3 全量必装**，一次 bootstrap 顺序完成。
+
+---
+
+## 安装模式：简化版（默认）/ 完整版（可选升级）
+
+**默认安装简化版（lite）**：零 API key、零嵌入数据库。原 DeepSeek LLM 承担的角色（总结、主题合成、语义精排）由运维知识库的 agent 自己兼任——检索走 **agentic grep/glob + 文件夹分类导航**，辅以本地 BM25 索引（`bm25_index.py`，自实现零依赖、直接扫描语料、不依赖嵌入库）、图谱/反链（`build_graph.py` / `ask.py --backlinks/--neighbors`）与 office 提取件。**默认不做 LLM 总结（summarize.py）和嵌入数据库（embed.py / embeddings.sqlite）。**
+
+**完整版（full）** 为可选升级：在上述基础上加 embeddings.sqlite（Zhipu embedding）+ DeepSeek 批处理（summarize / synthesize / semantic_lint P2 / ask.py --rerank/--deep）。两种模式共用同一套脚本集（一次拷齐），模式只影响 `maintain.py` 是否跑 LLM 步骤与 `ask.py` 的可用档位：
+
+| 能力 | 简化版 lite（默认） | 完整版 full |
+|------|--------------------|-------------|
+| 检索主力 | agentic grep/glob + 文件夹导航 + BM25 | ask.py 语义检索（低置信自动升级） |
+| ask.py 档位 | 自动降级 BM25；`--orphans/--backlinks/--neighbors/--path` 可用；`--deep/--rerank` 报缺失 | 全档位 |
+| office 提取 / build_index / build_graph / knowledge_map / health_report / dream | ✅ 本地运行 | ✅ |
+| embed / summarize / synthesize / semantic_lint P2 | ❌ 不跑（HARNESS_MODE=lite 时 maintain.py 跳过） | ✅ 需 API key |
+
+- 模式开关：`.env:HARNESS_MODE=lite|full`（新装默认 lite）。**未配置时的 legacy 兼容推断**：已存在 `.meta/embeddings.sqlite` 的仓库按完整版运行，否则按简化版——既有完整版仓库升级 bundle 脚本不会被静默降级。
+- **lite → full 升级路径**：填 `DEEPSEEK_API_KEY` + `ZHIPU_API_KEY` → `HARNESS_MODE=full` → 跑 `maintain.py --full`。无脚本增删、无目录迁移。
+- ask.py 以 `embeddings.sqlite` 是否存在自动判定降级——升级后无需改 AGENTS.md 即恢复全档位。
 
 ---
 
@@ -57,8 +76,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 维护是批量任务，串行执行是效率事故。三层落地：
 
-1. **脚本内并发**：embed.py / summarize.py / extract_office.py 内部用 ThreadPool 并发 API 调用与文件提取，并发数 `.env:MAINTAIN_CONCURRENCY`（默认 6，配合 `API_RATE_LIMIT_MS` 限速）
-2. **编排层并行**：maintain.py 把 embed 与 summarize 作为独立进程并行跑
+1. **脚本内并发**：embed.py / summarize.py / extract_office.py 内部用 ThreadPool 并发 API 调用与文件提取，并发数 `.env:MAINTAIN_CONCURRENCY`（默认 6，配合 `API_RATE_LIMIT_MS` 限速；embed/summarize 仅完整版运行）
+2. **编排层并行**：maintain.py 在完整版下把 embed 与 summarize 作为独立进程并行跑
 3. **agent 手工批量维护**：批量整理/迁移/打标/改写多文件时，**必须**并行派发（subagent 或一次响应内的并行工具调用），禁止逐文件串行循环——此准则同时写入目标仓库 AGENTS.md
 
 ### 记忆系统双硬约束
@@ -72,7 +91,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 | 机制组 | 对应目标 | 安装件 |
 |--------|---------|--------|
-| **自维护**（maintain 管线） | 自维护 + 永无死角 + 不重复建设 | maintain.py + extract_office/embed/summarize/index/graph/bm25/knowledge_map/health |
+| **自维护**（maintain 管线） | 自维护 + 永无死角 + 不重复建设 | maintain.py + extract_office/index/graph/bm25/knowledge_map/health（+ 完整版 embed/summarize） |
 | **自沉淀**（memory + 衰减） | 知识复利 | memory/ 结构 + dream.py + synthesize.py |
 | **自运行**（入口 + 检索 + 硬约束） | 全部四目标的跨会话可持续 | AGENTS.md + ask.py + pre-commit hook + converge 治理 |
 
@@ -94,8 +113,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
    |------|--------|---------|------|
    | ① | 隐私目录 | 嗅探命中文件清单 + 建议隐私目录 | a) 全部纳入 b) 仅部分（用户点名）c) 都不纳入；散落文件追加一问：移入隐私子目录 / 保持现状仅记录 |
    | ② | taxonomy | TAXONOMY.md 草案要点 | a) 接受 b) 用户口述调整、agent 改后再示 c) 留 draft 以后再定 |
-   | ③ | 全量安装确认 | 仓库画像 + rubric 提示 + 参数阈值建议 | a) 确认全量安装（Phase 1+2+3）b) 极小仓库先攒内容、暂不 bootstrap |
-   | ④ | API 配置 | env 字段清单（必填：DeepSeek/智谱 key；可选：PRIMARY_HOST） | a) 现在提供（贴入对话或用户自行编辑 .env）b) 稍后自填（骨架照装，LLM 步骤暂不可跑） |
+   | ③ | 安装模式 | 仓库画像 + rubric 提示 + 两模式能力对照（见"安装模式"节） | a) **简化版（默认）**：零 API、agentic grep/glob + BM25 + 文件夹管理 b) 完整版：加 embedding 库 + DeepSeek 总结/合成/精排（需 API key）c) 极小仓库先攒内容、暂不 bootstrap |
+   | ④ | API 配置（**仅决策点 ③ 选完整版时进行**） | env 字段清单（必填：DeepSeek/智谱 key；可选：PRIMARY_HOST） | a) 现在提供（贴入对话或用户自行编辑 .env）b) 稍后自填（骨架照装、HARNESS_MODE 暂留 lite，LLM 步骤不可跑） |
 
    每步的用户选择**记录进 `kb-bootstrap-decisions.md`**（定位：**执行记录**——记下每步选项、选择结果、日期）。
 6. **四个决策点全部有结果 → 直接进入 Phase 1**。中断后重触发时读 plan 中的决策记录，问用户"沿用历史决策 / 重新决策"。
@@ -105,14 +124,14 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 **这是"容忍必要体系建立"的核心阶段。** 装完即可自维护。
 
 1. 检测/调用 `init-agent-docs` 打底（见上方"已装检测与复用"；若它生成 AGENTS.md，随后由本技能模板覆盖）
-2. 拷贝**全部脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐，不分批）
-3. `templates/env.example` → `.env`（填 API key + PRIMARY_HOST + MAINTAIN_CONCURRENCY + OFFICE_EXTRACT_EXTS + 阈值）
+2. 拷贝**全部脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐，不分批；简化版/完整版共用同一脚本集，模式只影响运行）
+3. `templates/env.example` → `.env`（设 `HARNESS_MODE=lite`（默认）或 `full`；完整版另填 API key；另有 PRIMARY_HOST + MAINTAIN_CONCURRENCY + OFFICE_EXTRACT_EXTS + 阈值）
 4. `pip install -r requirements.txt`（含 office 提取依赖 python-docx/openpyxl/python-pptx/pypdf）
 5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）
 6. **紧接着**跑 `python .meta/scripts/sync_agents.py`（生成 CLAUDE.md/GEMINI.md）——步骤 5+6 视为一个原子动作：中间中断会造成三文件 MD5 不一致、pre-commit hook 拦截提交；续装时检测到不一致先补跑 sync_agents.py
 7. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）
 
-> **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
+> **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / 完整版 API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
 
 ### Phase 1.5 · 宿主护栏（可选，用户确认后装）
 
@@ -146,12 +165,12 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ### Bootstrap 完成判定
 
-1. `python .meta/scripts/maintain.py --full` 成功（extract_office + embed ∥ summarize + index + graph + bm25 + knowledge_map + health + dream 全跑通）
+1. `python .meta/scripts/maintain.py --full` 成功（简化版：extract_office + index + graph + bm25 + knowledge_map + health + dream；完整版另含 embed ∥ summarize）
 2. `health-report.md` 与 `.index/manifest.md` 生成；若仓库有 office 文档，`.meta/office-extracts/` 有产出
-3. **人审门（交互式）**：agent 引导用户用 ask.py 跑一条真实问题检索（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
+3. **人审门（交互式）**：agent 引导用户跑一条真实问题检索——简化版用 `ask.py "query"`（自动降级 BM25）或 agentic grep/glob，完整版用语义检索（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
 4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`、`bootstrap_phase` 改 `phase3`，填 `bootstrap_completed_at: <date>`，**重跑 `sync_agents.py`**（任何 AGENTS.md 改动都必须重跑，否则三文件 MD5 漂移、pre-commit hook 拦死后续 commit）
 
-> **API key 未配置时不得标 completed**：Phase 0 决策点 ④ 选了"稍后自填"的仓库，`maintain.py --full` 的 LLM 步骤必然失败——保持 `in_progress` 并在 kb-bootstrap-decisions.md 注明阻塞原因，key 配好后重跑完成判定。
+> **完整版才受 API key 门控**：简化版无 LLM 步骤，`maintain.py --full` 不依赖 API key 即可判 completed。决策点 ③ 选了完整版但 ④ 选"稍后自填"的仓库，LLM 步骤必然失败——保持 `in_progress`（或回退 lite）并在 kb-bootstrap-decisions.md 注明阻塞原因，key 配好后重跑完成判定。
 
 > **诚实标注**：maturity-rubric 的画像提示全部机械可判；bootstrap 完成判定含一次人审门（用户确认检索质量）——前者是信息呈现、后者决定体系是否就绪。
 
@@ -165,8 +184,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
-| `maintain.py` | 维护主入口（全管线编排，见文件头） | 编排下方各脚本 | `--full` / `--no-git` / `--semantic-lint` / `--skip-changelog` |
-| `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**低置信自动升级**（top-1<0.6 自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`） | embeddings.sqlite + graph.json + bm25 索引；Zhipu embed（查询）、DeepSeek（--rerank/--deep） | `"query"` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
+| `maintain.py` | 维护主入口（全管线编排，见文件头）；`HARNESS_MODE=lite`（默认）时跳过 embed/summarize | 编排下方各脚本 | `--full` / `--no-git` / `--semantic-lint` / `--skip-changelog` |
+| `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**简化版自动降级**：无 embeddings.sqlite 时默认查询与 --check 走 BM25（含 --scope 过滤），--deep/--rerank 明确报缺；完整版**低置信自动升级**（top-1<0.6 自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`） | embeddings.sqlite（完整版）+ graph.json + bm25 索引；Zhipu embed（查询）、DeepSeek（--rerank/--deep） | `"query"` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
 | `whoami.py` | 模型/provider 自检（两层识别：harness 路由 codex/claude-code/opencode → 内部 provider） | 本地只读，零 API | 无参 / `--frontmatter`（溯源 YAML） |
 
 ### 提取与索引层
@@ -174,11 +193,11 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
 | `extract_office.py` | office 文档（.docx/.xlsx/.pptx/.pdf）纯文本提取 → `.meta/office-extracts/` sidecar；增量按 hash；孤儿清理；老格式登记 `_legacy-formats.md`；ThreadPool 并发 | python-docx/openpyxl/python-pptx/pypdf（缺装时对应格式跳过并提示） | `--full` |
-| `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**跨文件并发 API** | Zhipu embedding | `--full` |
-| `summarize.py` | 每篇生成摘要/tag/关联 sidecar；**跨文件并发 API** | DeepSeek + embeddings | `--full` |
+| `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过） | Zhipu embedding | `--full` |
+| `summarize.py` | 每篇生成摘要/tag/关联 sidecar；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过） | DeepSeek + embeddings | `--full` |
 | `build_index.py` | `.index/manifest.md` + 分类清单 + topics.md（office 文档以 📎 标记纳入） | 本地 | 无参 |
-| `build_graph.py` | 全局图谱 graph.json（wikilink + semantic 边）+ 断链报告 | 本地（消费 embeddings） | 无参 |
-| `bm25_index.py` | BM25 稀疏索引（自实现零外部依赖）→ `.meta/bm25_index.json.gz` | embeddings.sqlite | `--build` / `--query "xxx" --top-k N` |
+| `build_graph.py` | 全局图谱 graph.json（wikilink + semantic 边）+ 断链报告 | 本地（semantic 边来自 summarize 产物，lite 下自动只有 wiki/md 边） | 无参 |
+| `bm25_index.py` | BM25 稀疏索引（自实现零外部依赖，**直接扫描语料**不依赖 embeddings.sqlite，lite/full 均可用）→ `.meta/bm25_index.json.gz` | 本地 | `--build` / `--query "xxx" --top-k N` |
 
 ### 派生报告与自沉淀层
 
@@ -187,8 +206,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `knowledge_map.py` | 消费 graph.json → `.meta/knowledge-map.md`（god nodes / 跨域连接 / 社区 / 偏差信号） | 本地零 API | 无参 |
 | `health_report.py` | `.meta/health-report.md`（孤儿/收件箱/稀疏分类告警，阈值 env 可调） | 本地 | 无参 |
 | `dream.py` | 记忆活性扫描 + 衰减预警 + 唤醒检测 → `.meta/dream-report.md`（所有建议均为提案不自动执行） | 本地零 API（git + frontmatter） | `--full`（预留） |
-| `semantic_lint.py` | P0 断链 / P1 孤儿概念·过时标记（本地启发式）/ P2 矛盾检测（DeepSeek）→ `.meta/semantic-lint-report.md` | P2 需 DeepSeek | 默认 quick / `--deep` / 回归测试类 `--check-*` |
-| `synthesize.py` | 主题合成（多篇聚合生成综述）→ `.meta/syntheses/` | DeepSeek | `--theme` / `--scope`（glob，逗号分隔）/ `--prompt` / `--max-notes` |
+| `semantic_lint.py` | P0 断链 / P1 孤儿概念·过时标记（本地启发式）/ P2 矛盾检测（DeepSeek，**完整版**）→ `.meta/semantic-lint-report.md` | P2 需 DeepSeek | 默认 quick / `--deep` / 回归测试类 `--check-*` |
+| `synthesize.py` | 主题合成（多篇聚合生成综述）→ `.meta/syntheses/`（**完整版**；简化版由 agent 直接读文兼任） | DeepSeek | `--theme` / `--scope`（glob，逗号分隔）/ `--prompt` / `--max-notes` |
 
 ### 支撑脚本（穷举）
 
@@ -256,7 +275,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 ```
 target-vault/
 ├── AGENTS.md / CLAUDE.md / GEMINI.md        ← 本技能模板（图书管理员准则 + 并行准则 + 维护管线）
-├── .env                                      ← 从 env.example 填充
+├── .env                                      ← 从 env.example 填充（HARNESS_MODE=lite 默认；完整版另填 API key）
 ├── .githooks/pre-commit                      ← 统一版 hook（plan status + converge 路径 + GOV 提醒 + key/隐私/MD5 + MEMORY.md 索引一致性）
 ├── docs/
 │   ├── STRUCTURE.md / plans/ / CURRENT.md    ← init-agent-docs 打底（若装）
@@ -285,10 +304,11 @@ target-vault/
 2. **office 提取质量边界**：提取只保纯文本——表格结构简化为 `|` 分隔、图表/图片内文字/批注不保真；.doc/.xls/.ppt 老格式不支持（登记提示转存）。检索命中提取件时永远指向源文件；**编辑改源文件，不改提取件**。
 3. **并发与限速**：MAINTAIN_CONCURRENCY 默认 6，与 API_RATE_LIMIT_MS 配合。触发 API 限流时先调低并发，不要关并发。
 4. **单用户单机假设**：本 harness 默认单机模型。多用户/多机仓库的主从边界需在 Phase 0 画像提示后由用户确认。
-5. **API 后端**：默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算；DeepSeek 发布新代时升级为该代次等型号，并同步 `templates/env.example` 与 `common.py` 默认值。
-6. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
-7. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
-8. **宿主护栏边界**：Phase 1.5 的护栏只拦机械路径规则（隐私目录、从机禁改清单、编辑重定向），不拦判断类规则（如检索策略选择）；它是状态侧（pre-commit）的加固层而非替代，软规则原文保留；各宿主 fail-open/fail-closed 行为以 `host_guard.py` docstring 与接线文件注释为准，不宣称为安全边界。
+5. **API 后端（仅完整版）**：完整版默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算；DeepSeek 发布新代时升级为该代次等型号，并同步 `templates/env.example` 与 `common.py` 默认值。简化版零 API，本条不涉及。
+6. **简化版的已知能力边界**：lite 模式 `detect_renames.py` 因无 embeddings.sqlite 跳过重命名检测（office 提取 sidecar 按 hash 自愈，不受影响）；summarize 的摘要/tag/关联 sidecar 不存在，`ask.py` 结果无摘要行、图谱无 semantic 边——这些是模式取舍而非故障。
+7. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
+8. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
+9. **宿主护栏边界**：Phase 1.5 的护栏只拦机械路径规则（隐私目录、从机禁改清单、编辑重定向），不拦判断类规则（如检索策略选择）；它是状态侧（pre-commit）的加固层而非替代，软规则原文保留；各宿主 fail-open/fail-closed 行为以 `host_guard.py` docstring 与接线文件注释为准，不宣称为安全边界。
 
 ---
 

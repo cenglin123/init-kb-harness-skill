@@ -21,15 +21,18 @@
 ### 三条元原则
 - **I · Occam** — 如无必要，勿增实体
 - **II · Separation of Authorship** — 谁写的谁看（用户原文 vs Agent 的 `.meta/`，两类产物永不混入）。Agent 产物必带 `model` / `generated_at`
-- **III · Bitter Lesson** — 通用方法优于硬编码先验，优先 embedding / LLM / 语义检索
+- **III · Bitter Lesson** — 通用方法优于硬编码先验；完整版优先 embedding / LLM / 语义检索，简化版优先 agentic 检索（agent 自身就是通用方法）
 
-### 检索方法默认
-任何寻找仓库内容的步骤默认调用 `.meta/scripts/ask.py`（语义检索；低置信时自动升级 hybrid/deep/rerank，无需手动决定）。Grep 仅用于已知精确字符串/路径定位、frontmatter 字段等结构性匹配。
+### 检索方法默认（按安装模式分档）
+
+**简化版（`.env:HARNESS_MODE=lite`，默认）——你是检索主力**：寻找仓库内容默认由你做 **agentic 检索**：按 `docs/TAXONOMY.md` 的文件夹分类导航定位候选目录 → Glob 圈定文件 → Grep 关键词/同义词多轮收敛。辅助手段：`python .meta/scripts/ask.py "query"`（自动降级为 BM25 本地检索）、`ask.py --backlinks/--neighbors/--path`（图谱遍历）、`.index/manifest.md` 分类清单。LLM 总结/语义精排类工作（写前查重的语义层、主题综述）由你直接读文兼任。
+
+**完整版（存在 `.meta/embeddings.sqlite`）**：任何寻找仓库内容的步骤默认调用 `python .meta/scripts/ask.py "query"`（语义检索；低置信时自动升级 hybrid/deep/rerank，无需手动决定），Grep 仅用于已知精确字符串/路径定位、frontmatter 字段等结构性匹配。
 
 ### 任务执行前必须先检索记忆系统
 接到任何任务后、动手执行前，**必须先检索记忆系统查看可能的过往经验**：
 1. 读 `.meta/memory/MEMORY.md` 索引，看 project / reference / user / workflows / feedback 各类下有哪些记忆条目
-2. 有相关条目则读取对应文件；不确定时跑 `python .meta/scripts/ask.py --scope memory "<任务关键词>"`
+2. 有相关条目则读取对应文件；不确定时跑 `python .meta/scripts/ask.py --scope memory "<任务关键词>"`（简化版自动走 BM25，覆盖 memory 语料）或 Grep `.meta/memory/`
 
 唯一豁免：用户当次明确说"不用查记忆/直接做"。否则此步不可跳过——重复踩已沉淀过的坑是记忆系统存在的反例。
 
@@ -59,7 +62,7 @@
 |----------|---------|------|
 | "维护" / "更新索引" | 增量索引 | `python .meta/scripts/maintain.py` |
 | "全量重建" / 首次运行 | 全量索引 | `python .meta/scripts/maintain.py --full` |
-| "我写过 X 吗？" / "搜索" | 查询 | `python .meta/scripts/ask.py "query"` |
+| "我写过 X 吗？" / "搜索" | 查询 | `python .meta/scripts/ask.py "query"`（简化版自动 BM25；复杂主题改 agentic grep/glob 多轮收敛） |
 | "帮我起草 X" | 新建笔记 | 落根目录，按用户要求写，纯 agent 创作须加 `model`/`generated_at` |
 | "评议" / "收敛" / "converge" | 执行前收敛 | 按 `.meta/converge/README.md` 走 converge SKILL |
 | "审计" / "复审" | 执行后验收 | 回到对应 active plan 的 review，由 fresh verifier 验收 |
@@ -67,7 +70,7 @@
 ### 第 2 步 · 执行前自检
 - [ ] 我是否已检索记忆系统（MEMORY.md / ask.py --scope memory）？除非用户明确豁免 → **先查再动手**
 - [ ] 我是否准备写入用户原文？如果是且用户没明确要求 → **停止**
-- [ ] 我是否准备用 Grep 找内容？如果不是精确字符串 → **改用 ask.py**
+- [ ] 我是否准备用 Grep 找内容？简化版：Grep/Glob 就是主力，但先按文件夹分类导航收敛范围；完整版：如果不是精确字符串 → **改用 ask.py**
 - [ ] 我是否准备逐文件串行处理一批文件？→ **改并行**（subagent / 并行工具调用）
 - [ ] 我是否准备新建纯 agent 创作的笔记？→ 运行 `whoami.py --frontmatter` 取溯源字段
 - [ ] 我是否准备改治理文档（`.meta/governed-files.txt` 命中）？→ 走 ultraverge
@@ -77,21 +80,23 @@
 ## 常用脚本
 
 ```bash
-python .meta/scripts/maintain.py                # 增量维护（全管线）
+python .meta/scripts/maintain.py                # 增量维护（全管线；简化版自动跳过 LLM 步骤）
 python .meta/scripts/maintain.py --full         # 全量重建
-python .meta/scripts/ask.py "query"             # 语义检索（低置信自动升级）
+python .meta/scripts/ask.py "query"             # 检索（简化版自动降级 BM25；完整版为语义检索+低置信自动升级）
+python .meta/scripts/ask.py --bm25 "query"      # 显式 BM25 本地检索（两种模式均可用）
 python .meta/scripts/ask.py --check "主题"      # 写前查重
 python .meta/scripts/ask.py --orphans           # 孤儿清单
-python .meta/scripts/ask.py --hybrid "query"    # BM25+Dense 混合检索
 python .meta/scripts/ask.py --scope memory "query"  # 记忆系统检索
 python .meta/scripts/memory_index.py            # 重建 MEMORY.md 记忆索引（索引硬约束）
-python .meta/scripts/synthesize.py --theme "主题" --scope "glob"  # 主题合成
-python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾检测）
 python .meta/scripts/whoami.py                  # 模型自检
 python .meta/scripts/whoami.py --frontmatter    # 溯源 YAML
+# 以下仅完整版（HARNESS_MODE=full 且已配 API key）：
+python .meta/scripts/ask.py --hybrid "query"    # BM25+Dense 混合检索
+python .meta/scripts/synthesize.py --theme "主题" --scope "glob"  # 主题合成
+python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾检测）
 ```
 
-模型配置见 `.env`；不得硬编码 key。
+模型配置见 `.env`；不得硬编码 key。简化版（`HARNESS_MODE=lite`，默认）零 API：检索主力是 agentic grep/glob + 文件夹导航，LLM 总结/综述由 agent 读文兼任。
 
 > CLAUDE.md / GEMINI.md 由 sync_agents.py 从 AGENTS.md 自动生成，禁止手改（pre-commit hook 强制 MD5 一致）。
 

@@ -3,8 +3,12 @@
 """
 ask.py — 语义查询 / 查重 / 孤儿检测
 
+简化版（lite，无 embeddings.sqlite）下自动降级：默认查询与 --check 走 BM25 本地检索，
+--hybrid 降级为纯 BM25，--deep / --rerank 不可用（需完整版 embeddings + DeepSeek）。
+--orphans / --backlinks / --neighbors / --path 为本地能力，两种模式均可用。
+
 用法:
-    python .meta/scripts/ask.py "问题"                    # 语义检索
+    python .meta/scripts/ask.py "问题"                    # 语义检索（简化版自动降级 BM25）
     python .meta/scripts/ask.py --check "打算写的主题"     # 写前查重
     python .meta/scripts/ask.py --orphans                  # 孤儿笔记清单
     python .meta/scripts/ask.py --backlinks "目标笔记"      # 反向链接查询
@@ -220,7 +224,8 @@ def apply_time_decay(path: str, sim: float, decay_params: tuple | None = None) -
 
 def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
     if not DB_PATH.exists():
-        print("⚠️  embeddings.sqlite 不存在，请先运行维护。")
+        print("⚠️  embeddings.sqlite 不存在（简化版模式无语义检索）。请用 --bm25，"
+              "或配置 API key 并以 HARNESS_MODE=full 跑维护生成嵌入库。")
         return []
 
     db = sqlite3.connect(str(DB_PATH))
@@ -915,6 +920,17 @@ def main():
 
     query = args.query
 
+    # ─── 简化版（lite）降级：无 embeddings.sqlite 时 dense/hybrid/deep/rerank 不可用 ───
+    has_embeddings = DB_PATH.exists()
+    if not has_embeddings:
+        if args.deep:
+            print("错误：--deep 需要完整版（embeddings + DeepSeek）。简化版请用 --bm25 检索，"
+                  "或由 agent 做 agentic grep/glob 多跳检索。", file=sys.stderr)
+            sys.exit(2)
+        if args.rerank:
+            print("错误：--rerank 需要完整版（embeddings.sqlite 提供 chunk 文本 + DeepSeek 精排）。", file=sys.stderr)
+            sys.exit(2)
+
     # 解析 --decay 参数（--deep 和普通检索共享）
     decay_params = None
     if args.decay is not None:
@@ -932,6 +948,16 @@ def main():
     # Determine retrieval mode
     use_hybrid = args.hybrid
     use_bm25 = args.bm25
+
+    if not has_embeddings and not use_bm25:
+        # 简化版（lite）：dense/hybrid 自动降级为 BM25 本地检索
+        if use_hybrid:
+            print("  [简化版] 无 embeddings.sqlite，--hybrid 降级为纯 BM25 检索", file=sys.stderr)
+            use_hybrid = False
+        else:
+            print("  [简化版] 无 embeddings.sqlite，自动使用 BM25 本地检索"
+                  "（复杂主题检索建议由 agent 做 agentic grep/glob）", file=sys.stderr)
+        use_bm25 = True
 
     if use_hybrid and use_bm25:
         print("错误：--hybrid 与 --bm25 互斥", file=sys.stderr)
@@ -1010,7 +1036,12 @@ def main():
         results = hybrid_search(query, top_k=top_k, scope=args.scope, decay_params=decay_params, weights=hybrid_weights)
     elif use_bm25:
         try:
-            results = [(path, score) for path, chunk_idx, score in bm25_search(query, top_k=top_k)]
+            # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
+            results = [
+                (path, score)
+                for path, chunk_idx, score in bm25_search(query, top_k=top_k * 4)
+                if path_matches_scope(path, args.scope)
+            ][:top_k]
         except Exception as e:
             print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
             results = []

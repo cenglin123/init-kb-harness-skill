@@ -1,6 +1,6 @@
 # init-kb-harness · 知识库 Harness 引导器
 
-给**任意** Obsidian 仓库（含不健全/空仓库、office 文档为主的仓库）从零建立一套可自维护、自沉淀、自运行的 harness 框架——维护管线（批量任务并行）+ 语义检索（.md + docx/xlsx/pptx/pdf 提取）+ 记忆 + converge 治理。**Phase 1→2→3 全量必装**，一次 bootstrap 完成。
+给**任意** Obsidian 仓库（含不健全/空仓库、office 文档为主的仓库）从零建立一套可自维护、自沉淀、自运行的 harness 框架——维护管线（批量任务并行）+ 检索（agentic grep/glob + 本地 BM25 + docx/xlsx/pptx/pdf 提取）+ 记忆 + converge 治理。**Phase 1→2→3 全量必装**，一次 bootstrap 完成。**默认安装简化版（lite）**：零 API key、零嵌入数据库，原 DeepSeek 承担的总结/精排角色由运维 agent 自己兼任；完整版（Zhipu embedding + DeepSeek）为可选升级，见 SKILL.md「安装模式」节。
 
 这是一个 **agent skill**（给 AI 编码助手用的能力包），不是独立命令行工具。需要在 Claude Code / Codex CLI / opencode 等 agent harness 里加载后由 agent 触发执行。
 
@@ -8,9 +8,9 @@
 
 ---
 
-## ⚠️ API 后端（重要）
+## ⚠️ API 后端（仅完整版需要）
 
-**默认绑 DeepSeek（chat）+ 智谱 Zhipu（embed），均为付费中文 API。** 换后端需改 `.meta/scripts/common.py` 的 client 类（不提供工厂抽象）。
+**简化版（默认）零 API**：检索走 agentic grep/glob + 本地 BM25，不需要任何 key。完整版才绑 **DeepSeek（chat）+ 智谱 Zhipu（embed），均为付费中文 API**。换后端需改 `.meta/scripts/common.py` 的 client 类（不提供工厂抽象）。
 
 - `DEEPSEEK_API_KEY` → chat completion（summarize.py / synthesize.py / semantic_lint.py --deep 等）
 - `ZHIPU_API_KEY` → embedding（embed.py / ask.py 查询）
@@ -25,19 +25,19 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ### 前置：Phase 0（由技能触发，read-only 体检 + 交互式引导）
 
-在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + 仓库画像，含 office 文档统计），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 全量安装确认 / API 配置四个决策点逐个给出选项供选择，选择结果记录进 `kb-bootstrap-decisions.md`（执行记录）。全部决策完成即进 Phase 1。
+在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + 仓库画像，含 office 文档统计），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 安装模式（简化版默认 / 完整版）/ API 配置（仅完整版）四个决策点逐个给出选项供选择，选择结果记录进 `kb-bootstrap-decisions.md`（执行记录）。全部决策完成即进 Phase 1。
 
 ### Phase 1→2→3（机械安装，一次完成）
 
 1. 检测/调用 `init-agent-docs` 打底（已装则复用不重铺）
 2. 拷贝**全量脚本集**到 `.meta/scripts/`（含 maintain.py 完整管线 + extract_office + dream/semantic_lint/synthesize/knowledge_map/bm25_index）
 3. `pip install -r requirements.txt`（含 office 提取依赖）
-4. `.env.example` → `.env`（API key + `PRIMARY_HOST` + `MAINTAIN_CONCURRENCY` + office/阈值参数）
+4. `.env.example` → `.env`（`HARNESS_MODE=lite`（默认）或 `full`；完整版另填 API key；另有 `PRIMARY_HOST` + `MAINTAIN_CONCURRENCY` + office/阈值参数）
 5. `docs/CONSTITUTION.md` + `docs/TAXONOMY.md` + `AGENTS.md`（`bootstrap_status: in_progress`）→ 跑 `sync_agents.py`
 6. 安装 `.githooks/pre-commit`（统一版）并接线：`git config core.hooksPath .githooks`
 7. Phase 2：拷贝 memory-scaffold 到 `.meta/memory/`
 8. Phase 3：建 `.meta/converge/` charter + `.meta/governed-files.txt` + `.env:CONVERGE_DIR`
-9. **完成判定**：`python .meta/scripts/maintain.py --full` 跑通 + agent 引导用户试跑 ask.py 检索（office 为主仓库验证命中 office 内容）、交互确认质量可接受 → `bootstrap_status: completed`
+9. **完成判定**：`python .meta/scripts/maintain.py --full` 跑通 + agent 引导用户试跑检索（简化版用 ask.py 自动降级 BM25 或 agentic grep/glob；office 为主仓库验证命中 office 内容）、交互确认质量可接受 → `bootstrap_status: completed`
 
 ---
 
@@ -56,7 +56,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 ## 依赖
 
 - **Python 3.10+**
-- **DeepSeek API key**（chat，付费）+ **智谱 Zhipu API key**（embedding，付费）
+- **简化版（默认）**：零 API key；**完整版（可选）**：DeepSeek API key（chat，付费）+ 智谱 Zhipu API key（embedding，付费）
 - **office 提取**：python-docx / openpyxl / python-pptx / pypdf（随 requirements.txt 安装；缺装时对应格式跳过）
 - **Git Bash**（Git for Windows 自带；pre-commit hook 是 bash 脚本。纯 GitHub Desktop / TortoiseGit 无 bash 环境需另装）
 - **Agent harness**：Claude Code / Codex CLI / opencode 等（需支持 skill 加载）
@@ -67,13 +67,13 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 | Phase | 性质 | 装什么 |
 |-------|------|--------|
-| **0** | read-only 体检 + 交互引导 | 分步决策引导（隐私 / taxonomy / 全量确认 / API），决策记录进 `kb-bootstrap-decisions.md` |
+| **0** | read-only 体检 + 交互引导 | 分步决策引导（隐私 / taxonomy / 安装模式 / API（仅完整版）），决策记录进 `kb-bootstrap-decisions.md` |
 | **1** | 骨架 + 检索 + office 提取 | 全量脚本集（maintain.py 完整管线 + extract_office + dream/semantic_lint/synthesize/knowledge_map/bm25_index）+ AGENTS.md + pre-commit |
 | **1.5** | 可选·宿主护栏 | 宿主探测 → `.meta/rules/host-write-policy.json` 策略落盘 → 按宿主生成适配（opencode 权限+插件 / Claude settings 合并 / Codex hooks.json）→ 实测验证；只拦机械路径规则，不拦判断（详见 SKILL.md） |
 | **2** | 自沉淀 | memory 结构（MEMORY.md + role + workflows）；dream/synthesize/semantic_lint 脚本已随 Phase 1 拷入 |
 | **3** | 治理 | `.meta/converge/` charter（**唯一治理目录**，converge + fresh verifier 单一生命周期）+ governed-files SSOT + CONVERGE_DIR 绑定 |
 
-维护批量任务默认并行：脚本内 ThreadPool 并发（`MAINTAIN_CONCURRENCY`）+ maintain.py 编排层 embed∥summarize + agent 手工批量维护必须并行派发（写入 AGENTS.md 准则）。
+维护批量任务默认并行：脚本内 ThreadPool 并发（`MAINTAIN_CONCURRENCY`）+ maintain.py 编排层 embed∥summarize（仅完整版）+ agent 手工批量维护必须并行派发（写入 AGENTS.md 准则）。
 
 ---
 

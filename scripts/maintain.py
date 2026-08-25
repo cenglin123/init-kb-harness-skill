@@ -6,10 +6,15 @@ maintain.py — init-kb-harness 维护主入口（完整管线）
 编排（批量任务默认并行）：
     提交用户改动 → detect_renames → check_sidecar_sources --fix
     → extract_office（office 文档 sidecar 提取，内部 ThreadPool 并发）
-    → embed ∥ summarize（双进程并行；各自内部再按 MAINTAIN_CONCURRENCY 并发 API）
+    → [完整版] embed ∥ summarize（双进程并行；各自内部再按 MAINTAIN_CONCURRENCY 并发 API）
     → build_index → build_graph → bm25_index --build → knowledge_map
     → health_report → [--semantic-lint] semantic_lint → memory_index → dream
     → file-dates / workflow frequency / CHANGELOG → 提交 Agent 产物
+
+安装模式（.env:HARNESS_MODE，默认 lite）：
+    lite（简化版）——跳过 embed/summarize 等 LLM 步骤；检索靠 BM25 本地索引 +
+        图谱/反链 + agent 自身 agentic grep/glob。零 API、零嵌入库。
+    full（完整版）——额外跑 embed ∥ summarize，提供语义检索 / 查重 / rerank / deep。
 
 用法:
     python .meta/scripts/maintain.py                  # 增量
@@ -31,6 +36,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
+
+# 安装模式：lite（简化版，默认，零 API）/ full（完整版，含 embed + summarize）
+# 未显式配置时按 legacy 兼容推断：已有嵌入库的仓库按完整版运行，否则简化版
+_mode_env = ENV.get('HARNESS_MODE', '').strip().lower()
+if _mode_env in ('lite', 'full'):
+    HARNESS_MODE = _mode_env
+else:
+    HARNESS_MODE = 'full' if (VAULT_ROOT / '.meta' / 'embeddings.sqlite').exists() else 'lite'
 
 # Windows 下隐藏子进程窗口
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -188,18 +201,22 @@ def generate_file_dates(git_ok):
             conn = sqlite3.connect(str(db_path))
             paths = [row[0] for row in conn.execute("SELECT DISTINCT path FROM embeddings")]
             conn.close()
+        else:
+            # 简化版（lite）无嵌入库：直接扫描语料取路径
+            from common import scan_indexable_notes, rel_path
+            paths = [rel_path(md) for md in scan_indexable_notes(scope='all')]
 
-            for path in paths:
-                try:
-                    result = subprocess.run(
-                        ['git', 'log', '-1', '--format=%at', '--', path],
-                        capture_output=True, text=True, cwd=str(VAULT_ROOT),
-                        timeout=5, creationflags=_NO_WINDOW,
-                    )
-                    if result.returncode == 0 and result.stdout.strip():
-                        dates[path] = float(result.stdout.strip())
-                except Exception:
-                    pass
+        for path in paths:
+            try:
+                result = subprocess.run(
+                    ['git', 'log', '-1', '--format=%at', '--', path],
+                    capture_output=True, text=True, cwd=str(VAULT_ROOT),
+                    timeout=5, creationflags=_NO_WINDOW,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    dates[path] = float(result.stdout.strip())
+            except Exception:
+                pass
 
     dates_path = VAULT_ROOT / '.meta' / 'file-dates.json'
     dates_path.write_text(json.dumps(dates, ensure_ascii=False), encoding='utf-8')
@@ -306,7 +323,7 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     log_script_run()
     start = datetime.now()
     print(f"=== 维护开始 @ {start.isoformat()} ===")
-    print(f"模式: {'全量 (--full)' if full else '增量'}")
+    print(f"模式: {'全量 (--full)' if full else '增量'} · HARNESS_MODE={HARNESS_MODE}")
 
     # 主从检测
     if not is_primary_host():
@@ -357,33 +374,38 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     if office_result.returncode != 0:
         print("  ⚠️  extract_office 失败（非致命，office 内容暂不可检索）")
 
-    # 4/6 · 嵌入（后台启动，与摘要并行；两脚本内部再按 MAINTAIN_CONCURRENCY 并发）
-    print("\n[4/6] 生成嵌入 + 摘要 / tag / 关联（并行）...")
-    embed_cmd = [sys.executable, str(SCRIPTS_DIR / 'embed.py')]
-    if full:
-        embed_cmd.append('--full')
-    embed_proc = subprocess.Popen(
-        embed_cmd, cwd=str(VAULT_ROOT),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding='utf-8', errors='replace',
-        creationflags=_NO_WINDOW,
-    )
+    # 4/6 · 嵌入 + 摘要（完整版；简化版跳过 LLM 步骤）
+    if HARNESS_MODE == 'full':
+        print("\n[4/6] 生成嵌入 + 摘要 / tag / 关联（并行）...")
+        embed_cmd = [sys.executable, str(SCRIPTS_DIR / 'embed.py')]
+        if full:
+            embed_cmd.append('--full')
+        embed_proc = subprocess.Popen(
+            embed_cmd, cwd=str(VAULT_ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace',
+            creationflags=_NO_WINDOW,
+        )
 
-    summarize_result = run_script('summarize.py', full=full)
-    outputs['summarize'] = log_subprocess_result('summarize', summarize_result)
+        summarize_result = run_script('summarize.py', full=full)
+        outputs['summarize'] = log_subprocess_result('summarize', summarize_result)
 
-    embed_stdout, embed_stderr = embed_proc.communicate()
-    embed_text = (embed_stdout or '') + (embed_stderr or '')
-    if embed_text.strip():
-        print(embed_text, end='' if embed_text.endswith('\n') else '\n')
-    outputs['embed'] = embed_text
-    if embed_proc.returncode != 0:
-        print("  ✗ embed 失败，中止")
-        return 1
+        embed_stdout, embed_stderr = embed_proc.communicate()
+        embed_text = (embed_stdout or '') + (embed_stderr or '')
+        if embed_text.strip():
+            print(embed_text, end='' if embed_text.endswith('\n') else '\n')
+        outputs['embed'] = embed_text
+        if embed_proc.returncode != 0:
+            print("  ✗ embed 失败，中止")
+            return 1
 
-    if summarize_result.returncode != 0:
-        print("  ✗ summarize 失败，中止")
-        return 1
+        if summarize_result.returncode != 0:
+            print("  ✗ summarize 失败，中止")
+            return 1
+    else:
+        print(f"\n[4/6] 简化版模式（HARNESS_MODE={HARNESS_MODE}）：跳过 embed / summarize（LLM 步骤）。")
+        print("  检索走 BM25 本地索引 + 图谱/反链 + agent agentic grep/glob；")
+        print("  需要语义检索时在 .env 设 HARNESS_MODE=full 并配置 API key。")
 
     # 5/6 · 构建索引
     print("\n[5/6] 构建索引 ...")
