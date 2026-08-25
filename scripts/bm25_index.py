@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bm25_index.py — BM25 稀疏索引构建与查询（零 API、零外部依赖）
+bm25_index.py — BM25 稀疏索引构建与查询（零 API、零嵌入库依赖）
 
 数据源：直接扫描 vault 语料（用户笔记 + office 提取 sidecar + memory，
 经 common.scan_indexable_notes），按 embed.chunk_text 相同规则分块。
@@ -112,7 +112,9 @@ def build_index():
 
     N = len(docs_paths)
     if N == 0:
-        print("⚠️  语料为空（无笔记 / office 提取件 / memory），BM25 索引未生成。")
+        # 语料为空时清除旧索引，避免命中已删除内容的陈旧结果
+        BM25_INDEX_PATH.unlink(missing_ok=True)
+        print("⚠️  语料为空（无笔记 / office 提取件 / memory），已清除旧 BM25 索引。")
         return
     avgdl = total_dl / N
 

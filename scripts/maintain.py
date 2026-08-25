@@ -43,6 +43,9 @@ _mode_env = ENV.get('HARNESS_MODE', '').strip().lower()
 if _mode_env in ('lite', 'full'):
     HARNESS_MODE = _mode_env
 else:
+    if _mode_env:
+        print(f"⚠️  无法识别的 HARNESS_MODE='{ENV.get('HARNESS_MODE')}'（应为 lite|full），"
+              f"按 legacy 规则推断模式", file=sys.stderr)
     HARNESS_MODE = 'full' if (VAULT_ROOT / '.meta' / 'embeddings.sqlite').exists() else 'lite'
 
 # Windows 下隐藏子进程窗口
@@ -142,15 +145,6 @@ def build_changelog_bullets(full, outputs):
             seen.add(bullet)
 
     return deduped[:4]
-
-
-def format_outputs_for_failure(outputs):
-    parts = []
-    for key in ('rename', 'office', 'embed', 'summarize', 'index', 'knowledge_map', 'health'):
-        out = outputs.get(key, '').strip()
-        if out:
-            parts.append(f"[{key}]\n{out}")
-    return '\n\n'.join(parts)
 
 
 def log_subprocess_result(label, result):
@@ -496,8 +490,6 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
             print("  ✓ 已提交")
         else:
             print("  ✓ 无 Agent 产物变化")
-    if format_outputs_for_failure(outputs):
-        pass
 
     elapsed = (datetime.now() - start).total_seconds()
     print(f"\n=== 维护完成，耗时 {elapsed:.1f}s ===")

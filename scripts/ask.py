@@ -99,13 +99,22 @@ def fetch_summary(path: str, max_len: int = 200) -> str:
         return ""
 
 
-def save_query_results(query: str, results: list, is_check: bool):
-    """将查询结果保存到 .meta/syntheses/queries/"""
+def save_query_results(query: str, results: list, is_check: bool, method: str = 'dense'):
+    """将查询结果保存到 .meta/syntheses/queries/
+
+    method: 实际使用的检索方式（dense / bm25 / hybrid），写入 frontmatter 溯源。
+    """
     now = datetime.now()
     timestamp = now.strftime('%Y%m%d-%H%M%S')
     slug = slugify(query) or 'untitled'
     filename = f"query-{timestamp}-{slug}.md"
     path = VAULT_ROOT / '.meta' / 'syntheses' / 'queries' / filename
+
+    model_by_method = {
+        'dense': 'zhipu-embedding-3',
+        'bm25': 'bm25-local',
+        'hybrid': 'bm25-local + zhipu-embedding-3',
+    }
 
     lines = [
         '---',
@@ -113,13 +122,14 @@ def save_query_results(query: str, results: list, is_check: bool):
         f"query: {query}",
         f"type: query-result",
         f"mode: {'check' if is_check else 'search'}",
+        f"retrieval: {method}",
         f"generated_at: {now.isoformat()}",
-        f"model: zhipu-embedding-3",
+        f"model: {model_by_method.get(method, method)}",
         '---',
         '',
         f'# Query: {query}',
         '',
-        f'> 模式: {"查重" if is_check else "语义检索"} | 命中 {len(results)} 条',
+        f'> 模式: {"查重" if is_check else "检索"} | 检索方式: {method} | 命中 {len(results)} 条',
         '',
         '## 结果',
         '',
@@ -1008,7 +1018,8 @@ def main():
             all_items = []
             for _, results, _ in round_outputs:
                 all_items.extend(results)
-            save_query_results(query, all_items, is_check=False)
+            save_query_results(query, all_items, is_check=False,
+                               method='hybrid' if use_hybrid else 'dense')
         return
 
     # --top-k 覆盖模式默认值；未提供时保持现有行为（普通 5，查重 10）
@@ -1034,18 +1045,26 @@ def main():
         print("以下已有笔记可能与你打算写的内容重合:")
     if use_hybrid:
         results = hybrid_search(query, top_k=top_k, scope=args.scope, decay_params=decay_params, weights=hybrid_weights)
+        retrieval_method = 'hybrid'
     elif use_bm25:
-        try:
-            # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
-            results = [
-                (path, score)
-                for path, chunk_idx, score in bm25_search(query, top_k=top_k * 4)
-                if path_matches_scope(path, args.scope)
-            ][:top_k]
-        except Exception as e:
-            print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
+        retrieval_method = 'bm25'
+        if not (VAULT_ROOT / '.meta' / 'bm25_index.json.gz').exists():
+            print("⚠️  BM25 索引不存在，请先运行 python .meta/scripts/maintain.py"
+                  "（或 python .meta/scripts/bm25_index.py --build）。")
             results = []
+        else:
+            try:
+                # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
+                results = [
+                    (path, score)
+                    for path, chunk_idx, score in bm25_search(query, top_k=top_k * 4)
+                    if path_matches_scope(path, args.scope)
+                ][:top_k]
+            except Exception as e:
+                print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
+                results = []
     else:
+        retrieval_method = 'dense'
         results = semantic_search(query, top_k=top_k, scope=args.scope, decay_params=decay_params)
         # 低置信自动升级（Phase 1a）：仅默认 dense 查询路径 + 非 --check。
         # --hybrid/--bm25/--deep 走其他分支/早退，天然不触发（A.2）；--rerank 时 allow_rerank=False 避免双重精排
@@ -1056,6 +1075,7 @@ def main():
             )
             if _esc_log:
                 results = _esc
+                retrieval_method = 'hybrid'
                 print(f"  [auto-escalated] → {' + '.join(_esc_log)}")
     if args.rerank:
         rerank_m = args.rerank_top_m if args.rerank_top_m is not None else min(top_k, 5)
@@ -1063,7 +1083,7 @@ def main():
     print_results(results)
 
     if args.save and results:
-        save_query_results(query, results, is_check=args.check)
+        save_query_results(query, results, is_check=args.check, method=retrieval_method)
 
 
 if __name__ == "__main__":
