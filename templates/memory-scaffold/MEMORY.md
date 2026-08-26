@@ -1,7 +1,8 @@
 # Memory 指针
 
 > 记忆系统索引。各 Agent 启动时读本文件了解有哪些可用记忆。
-> 实际记忆内容分布在下方各子目录。
+> 记忆是 agent 的私有笔记，存放用户画像、偏好纠正等 agent 专属物。
+> 知识库内容（可复用流程、项目上下文、外部参考等）由用户笔记目录承担，不重复存入记忆。
 
 ---
 
@@ -12,20 +13,17 @@
 ├── MEMORY.md              # 本文件（索引）
 ├── user/
 │   └── role.md            # 用户画像（用户直接编辑；Agent 追加不覆盖）
-├── feedback/              # 反馈记忆（用户偏好/纠正，带衰减）
-├── project/               # 项目记忆（进行中项目的上下文）
-├── reference/             # 外部参考（论文/文章摘要）+ 运维踩坑（type: pitfall）
-└── workflows/             # 可复用任务流程
-    └── README.md
+└── feedback/              # 反馈记忆（用户偏好/纠正）
 ```
+
+> 其余子目录按需涌现（如特定领域的 agent 观察），不预建。内容类信息（流程/项目/参考）存用户笔记目录。
 
 ## 记忆规则（写入 frontmatter）
 
 - **触发记录**：用户说"记住 X" / agent 发现反复出现的偏好或决策模式
-- **不记录**：可从代码/git log/笔记原文推导的事实；一次性会话细节；与日常协作无关的临时任务状态
+- **不记录**：可从笔记原文/git log 推导的事实；一次性会话细节；可由知识库内容目录承担的信息
 - **更新时必须更新 frontmatter 的 `last_updated` / `generated_at`**
-- **衰减**：dream.py（Phase 2）定期扫描，长期未确认/未触达的记忆降级或归档
-- **维护踩坑归宿**：维护过程踩坑（反复出现 / 有通用教训的脚本失败 / API 限流 / 编码陷阱 / 索引损坏等；一次性偶发失败不记录）归入 `reference/`，frontmatter 标 `type: pitfall` + `severity: high|med|low`；检索层（ask.py --scope memory）已覆盖 reference/，无需独立目录。**已知限制**：dream.py 衰减不感知 `severity`，高严重度且少被复引的踩坑会随时间沉睡——`severity` 当前仅作标记，未来可扩展为 dream.py 豁免依据
+- **衰减**：dream.py 定期扫描，长期未确认/未触达的记忆降级或归档
 
 ## 活性状态（dream.py 维护）
 
@@ -34,7 +32,7 @@
 - `confirmations: N`（被引用/确认次数）
 - `last_used: YYYY-MM-DD`
 
-dream.py 按 half-life 衰减：workflow 半衰期 90 天、feedback dormant 180 天 / archive 365 天。
+dream.py 按 frontmatter `type` 字段匹配衰减策略，按 half-life 衰减。
 
 ---
 
@@ -45,18 +43,5 @@ dream.py 按 half-life 衰减：workflow 半衰期 90 天、feedback dormant 180
 > 新建/删除/重命名记忆文件后，直接运行 `python .meta/scripts/memory_index.py` 刷新。
 
 <!-- memory-index:start -->
-### project/
-- （暂无）
-
-### reference/
-- （暂无）
-
-### user/
-- （暂无）
-
-### workflows/
-- （暂无）
-
-### feedback/
-- （暂无）
+（暂无）
 <!-- memory-index:end -->

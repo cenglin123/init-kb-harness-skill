@@ -52,13 +52,17 @@ Vault/
 
 ### 任务执行前必须先检索记忆系统
 接到任何任务后、动手执行前，**必须先检索记忆系统查看可能的过往经验**：
-1. 读 `.meta/memory/MEMORY.md` 索引，看 project / reference / user / workflows / feedback 各类下有哪些记忆条目
+1. 读 `.meta/memory/MEMORY.md` 索引，看当前有哪些记忆条目
 2. 有相关条目则读取对应文件；不确定时跑 `python .meta/scripts/ask.py --scope memory "<任务关键词>"`（简化版自动走 BM25，覆盖 memory 语料）或 Grep `.meta/memory/`
 
 唯一豁免：用户当次明确说"不用查记忆/直接做"。否则此步不可跳过——重复踩已沉淀过的坑是记忆系统存在的反例。
 
+> 记忆只存 agent 专属物（用户画像、偏好纠正等）。知识库内容（流程/项目/参考）由用户笔记目录承担。
+
 ### MEMORY.md 索引由脚本维护（硬约束）
 `.meta/memory/MEMORY.md` 的"当前记忆条目"段由 `.meta/scripts/memory_index.py` 自动重建（标记段 `<!-- memory-index:start/end -->` 内禁止手改）。新建/删除/重命名记忆文件后运行 `python .meta/scripts/memory_index.py` 刷新索引；maintain.py 每次维护自动重建，pre-commit hook 拦截过期索引的提交。**不要依赖自己记得去更新索引。**
+
+> 记忆只存 agent 专属物。知识库内容（流程/项目/参考）由用户笔记目录承担，不重复存入记忆系统。
 
 ### 批量任务必须并行
 维护管线的批量环节（embed / summarize / office 提取）已内置并发（`.env:MAINTAIN_CONCURRENCY`）。**你手工做批量维护（批量整理、迁移、打标、改写多个文件）时同样必须并行**：能并行派 subagent 的并行派发，能在一次响应里并行发多个工具调用的并行发——禁止逐文件串行循环。

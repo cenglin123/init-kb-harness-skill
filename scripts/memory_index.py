@@ -3,7 +3,7 @@
 """
 memory_index.py — MEMORY.md 记忆索引自动维护（硬约束，禁止手改索引段）
 
-扫描 .meta/memory/{project,reference,user,workflows,feedback}/ 下的记忆文件，
+扫描 .meta/memory/ 下所有子目录的记忆文件，
 自动重建 MEMORY.md 中 <!-- memory-index:start/end --> 标记之间的"当前记忆条目"段，
 保证索引始终反映记忆系统真实内容，不依赖 agent 记得手动维护。
 
@@ -30,7 +30,8 @@ MARK_START = '<!-- memory-index:start -->'
 MARK_END = '<!-- memory-index:end -->'
 
 # 索引分类（展示顺序固定）；不在表内的顶层目录归入"其他"
-CATEGORIES = ['project', 'reference', 'user', 'workflows', 'feedback']
+# 预建骨架：user/ 和 feedback/；其余按需涌现
+CATEGORIES = ['user', 'feedback']
 
 SKIP_NAMES = {'MEMORY.md', 'README.md'}
 

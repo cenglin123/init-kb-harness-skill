@@ -83,7 +83,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 ### 记忆系统双硬约束
 
 1. **任务执行前必查记忆**：目标仓库 AGENTS.md（`refs/agents-template.md`）必须包含硬要求——agent 接到任务后、执行前必须先检索记忆系统（读 `.meta/memory/MEMORY.md` 索引 + `ask.py --scope memory`），查看可能的过往经验；唯一豁免是用户当次明确说不必要。
-2. **MEMORY.md 索引脚本自动维护**：`scripts/memory_index.py` 扫描 `.meta/memory/{project,reference,user,workflows,feedback}/` 自动重建 MEMORY.md 索引标记段（`<!-- memory-index:start/end -->`，段内禁止手改），自动展示各分类当前全部条目。三层强制：maintain.py 每次维护自动重建 + pre-commit hook 拦截过期索引提交 + `--check` 模式供校验。**不允许依赖 agent 记得手动维护索引。**
+2. **MEMORY.md 索引脚本自动维护**：`scripts/memory_index.py` 扫描 `.meta/memory/` 下所有子目录自动重建 MEMORY.md 索引标记段（`<!-- memory-index:start/end -->`，段内禁止手改），自动展示各分类当前全部条目。三层强制：maintain.py 每次维护自动重建 + pre-commit hook 拦截过期索引提交 + `--check` 模式供校验。**不允许依赖 agent 记得手动维护索引。**
 
 ### 三自循环 ↔ CONSTITUTION 第零部四目标
 
@@ -152,9 +152,9 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ### Phase 2 · 自沉淀（必装）
 
-- 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（目录树与 MEMORY.md 自述一致：MEMORY.md + user/role.md + workflows/README.md + feedback/、project/、reference/ 空目录）
+- 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（MEMORY.md + user/ + feedback/ 骨架；其余子目录按需涌现，不预建。知识库内容由用户笔记目录承担，记忆只存 agent 专属物）
 - MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
-- 填充 AGENTS.md 的「项目记忆」内联段：从 Phase 0 决策记录（kb-bootstrap-decisions.md）提取 taxonomy 要点；活跃主题在 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好不在 Phase 0 决策范围内，需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）；替换 AGENTS.md 「项目记忆」段的占位符后跑 `sync_agents.py` 同步三文件
+- 填充 AGENTS.md 的「项目记忆」内联段：活跃主题待 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）；替换后跑 `sync_agents.py` 同步三文件
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
 
 ### Phase 3 · 治理（必装）

@@ -369,85 +369,87 @@ def main(full=False):
         'unclassified': [],         # 非四通道
     }
 
-    # 扫描各通道
-    for wf_file in (memory_root / 'workflows').glob('*.md'):
-        if wf_file.name == 'README.md':
+    # 扫描各通道：按 frontmatter type 路由，不依赖目录名硬编码
+    CHANNEL_MAP = {
+        'workflow': ('channel_a', channel_a_workflow, 'workflow'),
+        'feedback': ('channel_b', channel_b_feedback, 'feedback'),
+        'project':  ('channel_c', channel_c_project,  'project'),
+        'reference':('channel_d', channel_d_reference, 'reference'),
+    }
+    USER_DIRS = {'user'}  # user/ 为用户画像目录，不参与衰减
+
+    for md_file in memory_root.rglob('*.md'):
+        if md_file.name == 'MEMORY.md':
             continue
-        signal, reason, suggestion = channel_a_workflow(wf_file)
-        entry = {'file': str(wf_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
-                 'type': 'workflow', 'signal': signal, 'reason': reason}
-        if signal == 'DECAY':
-            entry['last_active'] = str(wf_file.stat().st_mtime)
-            if suggestion:
-                entry['suggestion'] = suggestion
-            results['archive_candidates'].append(entry)
-        elif signal == 'BORDERLINE':
-            results['borderline'].append(entry)
-        elif signal == 'UNKNOWN':
-            results['unknown'].append(entry)
-        else:
-            results['active'].append(entry)
-
-    for fb_file in (memory_root / 'feedback').glob('*.md'):
-        signal, reason, suggestion = channel_b_feedback(fb_file)
-        entry = {'file': str(fb_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
-                 'type': 'feedback', 'signal': signal, 'reason': reason}
-        if signal == 'ARCHIVE':
-            if suggestion:
-                entry['suggestion'] = suggestion
-            results['archive_candidates'].append(entry)
-        elif signal == 'DORMANT' and suggestion and '降级' in suggestion:
-            entry['current'] = 'active'
-            entry['suggested'] = 'dormant'
-            results['downgrade_suggestions'].append(entry)
-        elif signal == 'DORMANT':
-            results['dormant_keeping'].append(entry)
-        elif signal == 'STABLE':
-            if suggestion:
-                entry['suggestion'] = suggestion  # 带晋升建议，报告时从 stable 派生晋升候选段（design #3）
-            results['stable'].append(entry)
-        elif signal == 'UNKNOWN':
-            results['unknown'].append(entry)
-        else:
-            results['active'].append(entry)
-
-    for proj_file in (memory_root / 'project').glob('*.md'):
-        signal, reason, suggestion = channel_c_project(proj_file)
-        entry = {'file': str(proj_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
-                 'type': 'project', 'signal': signal, 'reason': reason}
-        if signal == 'STALE':
-            if suggestion:
-                entry['reason'] = reason
-            results['project_stale'].append(entry)
-        elif signal == 'FRESH':
-            results['fresh'].append(entry)
-        elif signal == 'UNKNOWN':
-            results['unknown'].append(entry)
-        else:
-            results['active'].append(entry)
-
-    for ref_file in (memory_root / 'reference').glob('*.md'):
-        signal, reason, _ = channel_d_reference(ref_file)
-        entry = {'file': str(ref_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
-                 'type': 'reference', 'signal': signal, 'reason': reason}
-        results['unclassified'].append(entry)
-
-    # 非四通道 catch-all（user/ 为用户画像目录，不参与衰减，不报未分类）
-    known_dirs = {'workflows', 'feedback', 'project', 'reference', 'user'}
-    for f in memory_root.rglob('*.md'):
-        if f.name == 'MEMORY.md':
+        parts = md_file.relative_to(memory_root).parts
+        if not parts:
             continue
-        parts = f.relative_to(memory_root).parts
-        if parts and parts[0] in known_dirs:
-            continue  # already handled above
+        if parts[0] in USER_DIRS:
+            continue
         if '.archive' in parts:
-            continue  # handled by wake detection
-        results['unclassified'].append({
-            'file': str(f.relative_to(VAULT_ROOT)).replace('\\', '/'),
-            'type': 'unknown',
-            'signal': 'UNCLASSIFIED',
-            'reason': '非四通道类型',
-        })
+            continue
+
+        # 读 frontmatter type 决定通道；无 type 则尝试从目录名推断
+        post = try_load_frontmatter(md_file)
+        mem_type = post.get('type') or (parts[0] if len(parts) > 1 else None)
+
+        if mem_type and mem_type in CHANNEL_MAP:
+            channel_id, channel_fn, type_label = CHANNEL_MAP[mem_type]
+            signal, reason, suggestion = channel_fn(md_file)
+            entry = {'file': str(md_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
+                     'type': type_label, 'signal': signal, 'reason': reason}
+            if channel_id == 'channel_a':
+                if signal == 'DECAY':
+                    entry['last_active'] = str(md_file.stat().st_mtime)
+                    if suggestion:
+                        entry['suggestion'] = suggestion
+                    results['archive_candidates'].append(entry)
+                elif signal == 'BORDERLINE':
+                    results['borderline'].append(entry)
+                elif signal == 'UNKNOWN':
+                    results['unknown'].append(entry)
+                else:
+                    results['active'].append(entry)
+            elif channel_id == 'channel_b':
+                if signal == 'ARCHIVE':
+                    if suggestion:
+                        entry['suggestion'] = suggestion
+                    results['archive_candidates'].append(entry)
+                elif signal == 'DORMANT' and suggestion and '降级' in suggestion:
+                    entry['current'] = 'active'
+                    entry['suggested'] = 'dormant'
+                    results['downgrade_suggestions'].append(entry)
+                elif signal == 'DORMANT':
+                    results['dormant_keeping'].append(entry)
+                elif signal == 'STABLE':
+                    if suggestion:
+                        entry['suggestion'] = suggestion
+                    results['stable'].append(entry)
+                elif signal == 'UNKNOWN':
+                    results['unknown'].append(entry)
+                else:
+                    results['active'].append(entry)
+            elif channel_id == 'channel_c':
+                if signal == 'STALE':
+                    if suggestion:
+                        entry['reason'] = reason
+                    results['project_stale'].append(entry)
+                elif signal == 'FRESH':
+                    results['fresh'].append(entry)
+                elif signal == 'UNKNOWN':
+                    results['unknown'].append(entry)
+                else:
+                    results['active'].append(entry)
+            else:  # channel_d
+                results['unclassified'].append(entry)
+        else:
+            # 无已知 type 的文件归入 unclassified
+            results['unclassified'].append({
+                'file': str(md_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
+                'type': 'unknown',
+                'signal': 'UNCLASSIFIED',
+                'reason': f'无已知 type 字段（type={mem_type}）',
+            })
 
     # 唤醒检测
     wakes = detect_wake()
