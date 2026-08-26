@@ -5,6 +5,27 @@
 
 ---
 
+## 目录契约
+
+> 以下为推荐结构,目录名按 TAXONOMY.md 定义,可按用户偏好调整。
+
+```
+Vault/
+├── <内容目录>/      # 按 TAXONOMY.md 定义的分类目录(如 复盘/ 工作流/ 收件箱/ 日记/ 等)
+├── docs/            # CONSTITUTION / TAXONOMY / STRUCTURE / CHANGELOG / plans/
+├── .meta/
+│   ├── scripts/     # 维护脚本
+│   ├── memory/      # 记忆系统
+│   ├── converge/    # 治理收敛产物(active/→done/)
+│   └── rules/       # 检索与隐私规则
+└── AGENTS.md / CLAUDE.md / GEMINI.md   # 三文件必须一致(改动后跑 sync_agents.py)
+```
+
+- 新笔记默认落对应类型目录;不要在根目录堆文件
+- 文件命名日期前置:`YYYY-MM-DD-<标题>.md`
+
+---
+
 ## 项目记忆（内联层 · 始终可见）
 
 > 本段是 AGENTS.md 内联硬约束——每次新会话首先看到，避免冷启动盲目。
@@ -105,6 +126,20 @@ python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾
 ## 治理（Phase 3）
 
 计划质量控制走单一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后 done`。机制权威源 = 全局 converge SKILL；本地路径绑定见 `.meta/converge/README.md`。治理文档机械边界 = `.meta/governed-files.txt`。
+
+---
+
+## 提交策略
+
+| 变更类型 | 范围 | 策略 |
+|----------|------|------|
+| 内容变更 | 用户笔记目录(按 TAXONOMY.md 定义) | 每个逻辑任务完成后自动提交,不等用户确认 |
+| 记忆变更 | .meta/memory/ | 跑完 memory_index.py 通过后自动提交 |
+| 治理变更 | AGENTS/CONSTITUTION/TAXONOMY/STRUCTURE/governed-files.txt 等 | 必须用户确认后再提交 |
+
+- 提交前必须完成该任务对应的维护流程,确保 pre-commit 通过
+- 单次会话中多个小变更可合并为一个提交,不必逐文件逐次
+- 每个逻辑任务完成后跑维护流程 + 提交,是"自维护"目标的落地保证
 
 ---
 

@@ -130,6 +130,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）
 6. **紧接着**跑 `python .meta/scripts/sync_agents.py`（生成 CLAUDE.md/GEMINI.md）——步骤 5+6 视为一个原子动作：中间中断会造成三文件 MD5 不一致、pre-commit hook 拦截提交；续装时检测到不一致先补跑 sync_agents.py
 7. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）
+8. 按 TAXONOMY.md 创建内容目录（如日记/复盘/收件箱等，名称因用户偏好而异）。若用户使用 Obsidian daily-notes 插件，配置 `.obsidian/daily-notes.json` 指向对应目录
 
 > **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / 完整版 API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
 
@@ -274,7 +275,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ```
 target-vault/
-├── AGENTS.md / CLAUDE.md / GEMINI.md        ← 本技能模板（图书管理员准则 + 并行准则 + 维护管线）
+├── AGENTS.md / CLAUDE.md / GEMINI.md        ← 本技能模板（图书管理员准则 + 并行准则 + 维护管线 + 提交策略）
+├── <内容目录>/                               ← 按 TAXONOMY.md 定义（日记/复盘/收件箱/工作流等,名称因用户偏好而异）
 ├── .env                                      ← 从 env.example 填充（HARNESS_MODE=lite 默认；完整版另填 API key）
 ├── .githooks/pre-commit                      ← 统一版 hook（plan status + converge 路径 + GOV 提醒 + key/隐私/MD5 + MEMORY.md 索引一致性）
 ├── docs/
