@@ -25,7 +25,7 @@
 ### 元原则 II · Separation of Authorship（谁写的谁看）
 - **用户的领地**：分类目录下的 `.md` 原文、用户手写的 tag/双链
 - **Agent 的领地**：`.meta/` 和 `.index/` 下的所有内容
-- **可追溯性**：Agent 产物必须在 frontmatter 携带 `model`、`generated_at`
+- **可追溯性**：Agent 产物必须在 frontmatter 携带 `agent`（宿主框架）、`model`、`generated_at`；技术类笔记另加 `applies`（universal / agent-bound / mixed）声明框架适用性——不同宿主框架的工具链与运行环境不同，跨框架复用经验前以此判断可信度
 
 ### 元原则 III · Bitter Lesson（通用方法优于硬编码先验）
 优先调用 embedding / LLM / 语义检索（通用 meta-method）；谨慎引入硬编码分类、关键词规则。

@@ -187,7 +187,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 |------|------|------|-----|
 | `maintain.py` | 维护主入口（全管线编排，见文件头）；`HARNESS_MODE=lite`（默认）时跳过 embed/summarize | 编排下方各脚本 | `--full` / `--no-git` / `--semantic-lint` / `--skip-changelog` |
 | `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**简化版自动降级**：无 embeddings.sqlite 时默认查询与 --check 走 BM25（含 --scope 过滤），--deep/--rerank 明确报缺；完整版**低置信自动升级**（top-1<0.6 自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`） | embeddings.sqlite（完整版）+ graph.json + bm25 索引；Zhipu embed（查询）、DeepSeek（--rerank/--deep） | `"query"` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
-| `whoami.py` | 模型/provider 自检（两层识别：harness 路由 codex/claude-code/opencode → 内部 provider） | 本地只读，零 API | 无参 / `--frontmatter`（溯源 YAML） |
+| `whoami.py` | 模型/provider 自检（两层识别：harness 路由 codex/claude-code/opencode → 内部 provider）；`--frontmatter` 输出溯源 YAML（agent/model/generated_at，`WHOAMI_AGENT` env 可显式指定宿主） | 本地只读，零 API | 无参 / `--frontmatter` |
 
 ### 提取与索引层
 

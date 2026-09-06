@@ -11,7 +11,7 @@ commit 模板或 UI 文案中的"Claude"字样不代表实际模型——准确�
 
 用法：
     python .meta/scripts/whoami.py                  # 自检（人读）
-    python .meta/scripts/whoami.py --frontmatter    # 输出 agent 溯源 YAML（created_by/model/generated_at）
+    python .meta/scripts/whoami.py --frontmatter    # 输出 agent 溯源 YAML（agent/model/generated_at）
 
 Provider 识别分两层：
   Layer 1 · Harness 路由（detect_harness）：
@@ -650,6 +650,17 @@ def fmt(field: FieldSource, fallback: str) -> str:
     return field.value
 
 
+def harness_agent_label() -> str:
+    """输出 frontmatter `agent` 字段：产出该笔记的宿主框架标识。
+
+    与 detect_harness() 一致（codex/claude-code/opencode/unknown）；允许用
+    WHOAMI_AGENT env 显式覆盖——WorkBuddy 等未注入专有运行时信号的宿主由
+    调用方自报家门，保证溯源字段永远有诚实值可写。
+    """
+    override = os.environ.get('WHOAMI_AGENT', '').strip()
+    return override or detect_harness()
+
+
 def output_frontmatter(
     cfg: Optional[dict[str, FieldSource]] = None,
     ccswitch: Optional[dict] = None,
@@ -700,6 +711,7 @@ def output_frontmatter(
 
     if primary_host and actual_host != primary_host:
         print(f'host: {actual_host}')
+    print(f'agent: {harness_agent_label()}')
     print(f'model: {model}')
     if degraded:
         print(f'confidence: low')

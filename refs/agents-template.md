@@ -41,7 +41,7 @@ Vault/
 
 ### 三条元原则
 - **I · Occam** — 如无必要，勿增实体
-- **II · Separation of Authorship** — 谁写的谁看（用户原文 vs Agent 的 `.meta/`，两类产物永不混入）。Agent 产物必带 `model` / `generated_at`
+- **II · Separation of Authorship** — 谁写的谁看（用户原文 vs Agent 的 `.meta/`，两类产物永不混入）。Agent 产物必带 `agent` / `model` / `generated_at`；技术类笔记加 `applies`（universal / agent-bound / mixed）
 - **III · Bitter Lesson** — 通用方法优于硬编码先验；完整版优先 embedding / LLM / 语义检索，简化版优先 agentic 检索（agent 自身就是通用方法）
 
 ### 检索方法默认（按安装模式分档）
@@ -88,7 +88,7 @@ Vault/
 | "维护" / "更新索引" | 增量索引 | `python .meta/scripts/maintain.py` |
 | "全量重建" / 首次运行 | 全量索引 | `python .meta/scripts/maintain.py --full` |
 | "我写过 X 吗？" / "搜索" | 查询 | `python .meta/scripts/ask.py "query"`（简化版自动 BM25；复杂主题改 agentic grep/glob 多轮收敛） |
-| "帮我起草 X" | 新建笔记 | 落根目录，按用户要求写，纯 agent 创作须加 `model`/`generated_at` |
+| "帮我起草 X" | 新建笔记 | 按用户要求写；技术类笔记（复盘/工作流）frontmatter 登记 `agent` / `model` / `generated_at` / `applies`（universal=环境无关 / agent-bound=依赖特定宿主框架 / mixed=部分绑定），非技术类可省 |
 | "评议" / "收敛" / "converge" | 执行前收敛 | 按 `.meta/converge/README.md` 走 converge SKILL |
 | "审计" / "复审" | 执行后验收 | 回到对应 active plan 的 review，由 fresh verifier 验收 |
 
@@ -97,7 +97,7 @@ Vault/
 - [ ] 我是否准备写入用户原文？如果是且用户没明确要求 → **停止**
 - [ ] 我是否准备用 Grep 找内容？简化版：Grep/Glob 就是主力，但先按文件夹分类导航收敛范围；完整版：如果不是精确字符串 → **改用 ask.py**
 - [ ] 我是否准备逐文件串行处理一批文件？→ **改并行**（subagent / 并行工具调用）
-- [ ] 我是否准备新建纯 agent 创作的笔记？→ 运行 `whoami.py --frontmatter` 取溯源字段
+- [ ] 我是否准备新建纯 agent 创作的笔记？→ 运行 `whoami.py --frontmatter` 取溯源字段（agent/model/generated_at）；技术类笔记自评 `applies`（框架绑定的结论标 agent-bound 或 mixed，正文就地标注）
 - [ ] 我是否准备改治理文档（`.meta/governed-files.txt` 命中）？→ 走 ultraverge
 
 ---
@@ -114,7 +114,7 @@ python .meta/scripts/ask.py --orphans           # 孤儿清单
 python .meta/scripts/ask.py --scope memory "query"  # 记忆系统检索
 python .meta/scripts/memory_index.py            # 重建 MEMORY.md 记忆索引（索引硬约束）
 python .meta/scripts/whoami.py                  # 模型自检
-python .meta/scripts/whoami.py --frontmatter    # 溯源 YAML
+python .meta/scripts/whoami.py --frontmatter    # 溯源 YAML（agent/model/generated_at；WHOAMI_AGENT env 可显式指定宿主）
 # 以下仅完整版（HARNESS_MODE=full 且已配 API key）：
 python .meta/scripts/ask.py --hybrid "query"    # BM25+Dense 混合检索
 python .meta/scripts/synthesize.py --theme "主题" --scope "glob"  # 主题合成
