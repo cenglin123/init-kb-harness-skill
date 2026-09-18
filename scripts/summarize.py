@@ -24,6 +24,7 @@ from common import (
     VAULT_ROOT, scan_notes, scan_office_extracts, content_hash, rel_path,
     meta_mirror, ensure_parent, DeepSeekClient,
     find_all_wikilinks, find_all_mdlinks, MAINTAIN_CONCURRENCY,
+    llm_pipeline_check,
 )
 from embed import blob_to_embedding
 
@@ -215,6 +216,12 @@ def main(full=False):
     notes = []
     for md in list(scan_notes()) + list(scan_office_extracts()):
         rel = rel_path(md)
+        # 大文件闸门（硬约束）：超过阈值且无 allow 决定的文件不进 LLM 管线
+        allowed, reason = llm_pipeline_check(md)
+        if not allowed:
+            size_mb = md.stat().st_size / 1048576
+            print(f"  [挂起·{reason}] {rel}（{size_mb:.2f} MB 超阈值）——本轮不生成摘要/tag/关联，待用户决定")
+            continue
         h = content_hash(md)
         notes.append((md, rel, h))
     print(f"  共 {len(notes)} 篇笔记（含 office 提取）")

@@ -20,8 +20,9 @@ import hashlib
 import subprocess
 import time
 import socket
+from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 from collections import defaultdict
 from urllib.parse import unquote
 
@@ -223,6 +224,151 @@ def scan_indexable_notes(scope: str = 'all') -> Iterator[Path]:
 def rel_path(p: Path) -> str:
     """统一用正斜杠的相对路径"""
     return str(p.relative_to(VAULT_ROOT)).replace('\\', '/')
+
+# ─── 大文件闸门（硬约束，完整版 LLM 管线）───────────────────────────────────
+# 单文件超过阈值（默认 1MB）不直接进入嵌入/LLM 管线（embed / summarize），
+# 由脚本硬性挡下并登记挂起；维护完成后由 agent 向用户询问处理方式，决定写入
+# .meta/rules/large-file-policy.md 后生效。检查编码在脚本内执行，不依赖 agent 自觉。
+# BM25 / 图谱 / manifest 索引为本地直扫语料，不受本闸门影响（保留检索覆盖）。
+
+LARGE_FILE_THRESHOLD_MB = float(ENV.get('LARGE_FILE_THRESHOLD_MB', '1'))
+LARGE_FILE_THRESHOLD_BYTES = int(LARGE_FILE_THRESHOLD_MB * 1024 * 1024)
+LARGE_FILE_POLICY_PATH = VAULT_ROOT / '.meta' / 'rules' / 'large-file-policy.md'
+LARGE_FILE_PENDING_JSON = VAULT_ROOT / '.meta' / 'large-files-pending.json'
+LARGE_FILE_PENDING_MD = VAULT_ROOT / '.meta' / 'large-files-pending.md'
+
+# 用户决定记录文件的模板（首次发生挂起时由脚本自动创建）
+LARGE_FILE_POLICY_TEMPLATE = """# 大文件处理策略（用户决定记录）
+
+> **本文件只能记录用户的明确决定，禁止 agent 未经询问自行填写。**
+> 挂起清单见 `.meta/large-files-pending.md`；维护完成后 agent 必须逐个向用户
+> 询问处理方式（1 全套正常处理 / 2 仅排除嵌入与LLM / 3 本次跳过 / 4 切分 / 5 删除），
+> 然后按下方格式把决定追加到「已决定」段。
+>
+> - `相对路径` → allow      （选项 1：全套正常处理，进嵌入/LLM 管线）
+> - `相对路径` → llm_skip   （选项 2：仅排除嵌入/LLM，BM25/图谱/关键词照常）
+> - `相对路径` → skip       （选项 3：本次跳过，下次维护再询问）
+> - 选项 4（切分，需 agent 先给切分建议、用户确认后执行）与选项 5（删除）
+>   完成后原文件已不存在/已变小，删除对应行即可，挂起清单自动消失。
+
+## 已决定
+
+<!-- 每行一条，格式：- `相对路径` → allow|llm_skip|skip -->
+"""
+
+LARGE_FILE_ACTION_RE = re.compile(
+    r'^\s*[-*]\s+`?([^`\n]+?)`?\s*(?:→|->)\s*(allow|llm_skip|skip)\s*$', re.MULTILINE
+)
+
+
+def load_large_file_policy() -> dict:
+    """解析用户决定记录：{相对路径: allow|llm_skip|skip}。文件不存在返回空。"""
+    if not LARGE_FILE_POLICY_PATH.exists():
+        return {}
+    text = LARGE_FILE_POLICY_PATH.read_text(encoding='utf-8', errors='ignore')
+    return {m.group(1).strip(): m.group(2) for m in LARGE_FILE_ACTION_RE.finditer(text)}
+
+
+def file_oversize(path: Path, size: Optional[int] = None) -> bool:
+    """单文件是否超过大文件阈值。"""
+    if size is None:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+    return size > LARGE_FILE_THRESHOLD_BYTES
+
+
+def llm_pipeline_check(path: Path, size: Optional[int] = None):
+    """大文件闸门判定（嵌入/LLM 管线入口统一调用）。
+
+    返回 (allowed: bool, reason: str)：
+    - (True, '')                —— 未超阈值，或用户已决定 allow
+    - (False, 'llm_skip')       —— 用户决定仅排除嵌入/LLM
+    - (False, 'skip')           —— 用户决定本次跳过
+    - (False, 'pending')        —— 超阈值且尚无用户决定（挂起）
+    """
+    if not file_oversize(path, size):
+        return True, ''
+    action = load_large_file_policy().get(rel_path(path), '')
+    if action == 'allow':
+        return True, ''
+    if action in ('llm_skip', 'skip'):
+        return False, action
+    return False, 'pending'
+
+
+def refresh_large_file_report() -> int:
+    """重扫语料生成挂起清单（.meta/large-files-pending.{json,md}）。
+
+    仅维护主入口（maintain.py）在 embed/summarize 结束后调用——单写者，避免
+    并行子进程竞争。已决定 allow / llm_skip 的文件不出现在挂起清单；文件删除
+    或缩回阈值内后条目自动消失。返回挂起文件数。"""
+    policy = load_large_file_policy()
+    oversize = []
+    for md in scan_indexable_notes(scope='all'):
+        try:
+            size = md.stat().st_size
+        except OSError:
+            continue
+        if size > LARGE_FILE_THRESHOLD_BYTES:
+            oversize.append((rel_path(md), size))
+
+    # 合并旧账目的 first_detected
+    old_first = {}
+    try:
+        if LARGE_FILE_PENDING_JSON.exists():
+            old = json.loads(LARGE_FILE_PENDING_JSON.read_text(encoding='utf-8'))
+            old_first = {f['path']: f.get('first_detected', '') for f in old.get('files', [])}
+    except Exception:
+        pass
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    pending = [
+        {'path': rel, 'size': size,
+         'first_detected': old_first.get(rel) or today, 'last_seen': today}
+        for rel, size in sorted(oversize)
+        if policy.get(rel) not in ('allow', 'llm_skip')
+    ]
+
+    LARGE_FILE_PENDING_JSON.parent.mkdir(parents=True, exist_ok=True)
+    LARGE_FILE_PENDING_JSON.write_text(json.dumps({
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'threshold_mb': LARGE_FILE_THRESHOLD_MB,
+        'files': pending,
+    }, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    if pending and not LARGE_FILE_POLICY_PATH.exists():
+        LARGE_FILE_POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LARGE_FILE_POLICY_PATH.write_text(LARGE_FILE_POLICY_TEMPLATE, encoding='utf-8')
+
+    lines = [
+        '# 大文件挂起清单',
+        '',
+        f'> 生成时间：{datetime.now().isoformat(timespec="seconds")} · '
+        f'阈值：{LARGE_FILE_THRESHOLD_MB:g} MB · 挂起数：{len(pending)}',
+        '',
+        '以下文件**本轮维护未进入嵌入/LLM 管线**（embed / summarize 被脚本硬性挡下）；',
+        'BM25 / 图谱 / manifest 索引不受影响，检索覆盖正常。',
+        '',
+        '维护完成后，**agent 必须逐个向用户询问处理方式**：',
+        '',
+        '1. **全套正常处理**——嵌入/LLM + BM25 + 图谱 + 关键词全部照常（决定写 `allow`）',
+        '2. **仅排除嵌入/LLM**——BM25 / 图谱 / 关键词照做（决定写 `llm_skip`）',
+        '3. **本次跳过该文件**——下轮维护再询问（决定写 `skip`）',
+        '4. **切分文件**——agent 先提出具体切分建议（按 H2 章节 / 主题边界等），用户确认后执行',
+        '5. **删除文件**——用户确认后删除',
+        '',
+        '决定写入 `.meta/rules/large-file-policy.md`（格式见该文件头注释）。',
+        '',
+        '| 文件 | 大小 | 首次发现 | 最近发现 |',
+        '|---|---|---|---|',
+    ]
+    for f in pending:
+        lines.append(f"| `{f['path']}` | {f['size'] / 1048576:.2f} MB | {f['first_detected']} | {f['last_seen']} |")
+    lines.append('')
+    LARGE_FILE_PENDING_MD.write_text('\n'.join(lines), encoding='utf-8')
+    return len(pending)
 
 # ─── 哈希 ──────────────────────────────────────────────────────────────────
 def content_hash(path: Path) -> str:

@@ -13,7 +13,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 **默认安装简化版（lite）**：零 API key、零嵌入数据库。原 DeepSeek LLM 承担的角色（总结、主题合成、语义精排）由运维知识库的 agent 自己兼任——检索走 **agentic grep/glob + 文件夹分类导航**，辅以本地 BM25 索引（`bm25_index.py`，自实现算法、直接扫描语料、不依赖嵌入库与 API）、图谱/反链（`build_graph.py` / `ask.py --backlinks/--neighbors`）与 office 提取件。**默认不做 LLM 总结（summarize.py）和嵌入数据库（embed.py / embeddings.sqlite）。**
 
-**完整版（full）** 为可选升级：在上述基础上加 embeddings.sqlite（Zhipu embedding）+ DeepSeek 批处理（summarize / synthesize / semantic_lint P2 / ask.py --rerank/--deep）。两种模式共用同一套脚本集（一次拷齐），模式只影响 `maintain.py` 是否跑 LLM 步骤与 `ask.py` 的可用档位：
+**完整版（full）** 为可选升级：在上述基础上加 embeddings.sqlite（Zhipu embedding）+ DeepSeek 批处理（summarize / synthesize / semantic_lint P2 / ask.py --rerank/--deep）。两种模式共用同一套脚本集（一次拷齐），模式只影响 `maintain.py` 是否跑 LLM 步骤与 `ask.py` 的可用档位。完整版另内置**大文件闸门**（硬约束，写在脚本里）：超过 `LARGE_FILE_THRESHOLD_MB`（默认 1MB）的单文件不直接进嵌入/LLM 管线，挂起登记 `.meta/large-files-pending.md`，维护完成后 agent 必须向用户询问处理方式（全套 / 仅排除嵌入与LLM / 跳过 / 切分 / 删除），决定记录 `.meta/rules/large-file-policy.md`：
 
 | 能力 | 简化版 lite（默认） | 完整版 full |
 |------|--------------------|-------------|
@@ -194,8 +194,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
 | `extract_office.py` | office 文档（.docx/.xlsx/.pptx/.pdf）纯文本提取 → `.meta/office-extracts/` sidecar；增量按 hash；孤儿清理；老格式登记 `_legacy-formats.md`；ThreadPool 并发 | python-docx/openpyxl/python-pptx/pypdf（缺装时对应格式跳过并提示） | `--full` |
-| `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过） | Zhipu embedding | `--full` |
-| `summarize.py` | 每篇生成摘要/tag/关联 sidecar；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过） | DeepSeek + embeddings | `--full` |
+| `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过）；大文件闸门：超阈值且无 allow 决定的文件硬性跳过（llm_skip 决定同时清除历史向量） | Zhipu embedding | `--full` |
+| `summarize.py` | 每篇生成摘要/tag/关联 sidecar；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过）；大文件闸门同 embed | DeepSeek + embeddings | `--full` |
 | `build_index.py` | `.index/manifest.md` + 分类清单 + topics.md（office 文档以 📎 标记纳入） | 本地 | 无参 |
 | `build_graph.py` | 全局图谱 graph.json（wikilink + semantic 边）+ 断链报告 | 本地（semantic 边来自 summarize 产物，lite 下自动只有 wiki/md 边） | 无参 |
 | `bm25_index.py` | BM25 稀疏索引（自实现算法、零 API、零嵌入库依赖，**直接扫描语料**，lite/full 均可用）→ `.meta/bm25_index.json.gz` | 本地 | `--build` / `--query "xxx" --top-k N` |
@@ -308,9 +308,10 @@ target-vault/
 4. **单用户单机假设**：本 harness 默认单机模型。多用户/多机仓库的主从边界需在 Phase 0 画像提示后由用户确认。
 5. **API 后端（仅完整版）**：完整版默认绑死 DeepSeek+智谱（`common.py` client 无工厂）。换后端需改 `common.py`。**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算；DeepSeek 发布新代时升级为该代次等型号，并同步 `templates/env.example` 与 `common.py` 默认值。简化版零 API，本条不涉及。
 6. **简化版的已知能力边界**：lite 模式 `detect_renames.py` 因无 embeddings.sqlite 跳过重命名检测（office 提取 sidecar 按 hash 自愈，不受影响）；summarize 的摘要/tag/关联 sidecar 不存在，`ask.py` 结果无摘要行、图谱无 semantic 边——这些是模式取舍而非故障。
-7. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
-8. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
-9. **宿主护栏边界**：Phase 1.5 的护栏只拦机械路径规则（隐私目录、从机禁改清单、编辑重定向），不拦判断类规则（如检索策略选择）；它是状态侧（pre-commit）的加固层而非替代，软规则原文保留；各宿主 fail-open/fail-closed 行为以 `host_guard.py` docstring 与接线文件注释为准，不宣称为安全边界。
+7. **大文件闸门（完整版）**：超 `LARGE_FILE_THRESHOLD_MB`（默认 1MB，`.env` 可调）的单文件被脚本硬性挡在 embed/summarize 外并挂起（`.meta/large-files-pending.md`），**BM25/图谱/manifest 索引照常覆盖该文件**；维护完成后 agent 必须逐个向用户询问 5 个处理选项，决定落 `.meta/rules/large-file-policy.md`（allow / llm_skip / skip；切分与删除完成后删除对应行即自动出清单）。`llm_skip` 会在下次维护清除该文件历史向量。闸门只拦 LLM 管线，不拦 agentic grep/glob 阅读——agent 按用户要求仍可人工读改大文件。
+8. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
+9. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
+10. **宿主护栏边界**：Phase 1.5 的护栏只拦机械路径规则（隐私目录、从机禁改清单、编辑重定向），不拦判断类规则（如检索策略选择）；它是状态侧（pre-commit）的加固层而非替代，软规则原文保留；各宿主 fail-open/fail-closed 行为以 `host_guard.py` docstring 与接线文件注释为准，不宣称为安全边界。
 
 ---
 

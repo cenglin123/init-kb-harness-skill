@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_indexable_notes, content_hash, rel_path,
-    ZhipuEmbedClient, ENV, MAINTAIN_CONCURRENCY,
+    ZhipuEmbedClient, ENV, MAINTAIN_CONCURRENCY, llm_pipeline_check,
 )
 
 DB_PATH = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
@@ -109,6 +109,17 @@ def main(full=False):
     for md in scan_indexable_notes(scope='all'):
         rel = rel_path(md)
         current_paths.add(rel)
+
+        # 大文件闸门（硬约束）：超过阈值且无 allow 决定的文件不进嵌入管线
+        allowed, reason = llm_pipeline_check(md)
+        if not allowed:
+            if reason == 'llm_skip':
+                # 用户决定仅排除嵌入/LLM：清掉历史向量，让排除立即生效
+                db.execute("DELETE FROM embeddings WHERE path=?", (rel,))
+            size_mb = md.stat().st_size / 1048576
+            print(f"  [挂起·{reason}] {rel}（{size_mb:.2f} MB 超阈值）——本轮不嵌入，待用户决定")
+            continue
+
         try:
             content = md.read_text(encoding='utf-8')
         except Exception as e:
@@ -118,6 +129,8 @@ def main(full=False):
         if not full and processed.get(rel) == h:
             continue
         targets.append((rel, h, content))
+
+    db.commit()
 
     # 清理已删除文件
     stale = [p for p in processed if p not in current_paths]

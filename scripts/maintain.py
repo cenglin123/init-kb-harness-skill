@@ -33,7 +33,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run
+from common import (
+    VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run,
+    refresh_large_file_report,
+)
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
@@ -396,6 +399,19 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
         if summarize_result.returncode != 0:
             print("  ✗ summarize 失败，中止")
             return 1
+
+        # 大文件闸门收尾（单写者：embed/summarize 已结束，此处重扫生成挂起清单）
+        pending_large = refresh_large_file_report()
+        if pending_large:
+            print(f"\n⚠️  {pending_large} 个超过阈值的大文件已挂起（未进嵌入/LLM 管线），"
+                  f"清单见 .meta/large-files-pending.md")
+            print("  → 维护完成后，agent 必须逐个向用户询问处理方式，并把决定写入"
+                  " .meta/rules/large-file-policy.md：")
+            print("     1) 全套正常处理（嵌入/LLM+BM25+图谱+关键词）")
+            print("     2) 仅排除嵌入/LLM，其余照做")
+            print("     3) 本次跳过该文件")
+            print("     4) 切分文件（agent 先提出切分建议，用户确认后执行）")
+            print("     5) 删除文件（用户确认后执行）")
     else:
         print(f"\n[4/6] 简化版模式（HARNESS_MODE={HARNESS_MODE}）：跳过 embed / summarize（LLM 步骤）。")
         print("  检索走 BM25 本地索引 + 图谱/反链 + agent agentic grep/glob；")
