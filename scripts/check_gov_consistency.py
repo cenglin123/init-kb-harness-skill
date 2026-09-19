@@ -1,25 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""同步 AGENTS.md 到 CLAUDE.md / GEMINI.md，并校验 MD5。
---check-gov-consistency 子命令校验治理文档三方一致性（SSOT / AGENTS 明线 / hook GOV_PATTERNS）。
+"""check_gov_consistency.py — 治理边界一致性校验（SSOT / AGENTS 明线 / hook GOV_PATTERNS）。
+
+三方比对：
+- .meta/governed-files.txt（机械 SSOT）
+- AGENTS.md「硬性规则」段中的 backtick 路径（或其指向 SSOT 的委托声明）
+- .githooks/pre-commit 的 GOV_PATTERNS（或其向 SSOT 的委托声明）
+
+bootstrap 例外：SSOT + 新治理文件 + AGENTS/hook 同批 staged 时跳过。
 """
 
 import argparse
-import hashlib
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "AGENTS.md"
-TARGETS = [ROOT / "CLAUDE.md", ROOT / "GEMINI.md"]
 
-
-def md5(path: Path) -> str:
-    return hashlib.md5(path.read_bytes()).hexdigest()
 
 
 def normalize_token(token: str) -> str:
@@ -126,17 +125,6 @@ def check_bootstrap_exception() -> bool:
     return has_ssot and has_agents_hook
 
 
-def print_diff(side: str, missing: list, extra: list):
-    """Print diff between two sides."""
-    if missing:
-        print(f"  [{side}] 缺少以下项目 (SSOT 有但 {side} 无):")
-        for t in missing:
-            print(f"    - `{t}`")
-    if extra:
-        print(f"  [{side}] 多出以下项目 ({side} 有但 SSOT 无):")
-        for t in extra:
-            print(f"    + `{t}`")
-
 
 def check_gov_consistency() -> int:
     """--check-gov-consistency: verify T_agents == T_ssot and T_hook ⊇ T_ssot."""
@@ -167,10 +155,11 @@ def check_gov_consistency() -> int:
 
     errors = []
 
-    # Determine if AGENTS delegates to SSOT (contains .meta/governed-files.txt reference)
-    agents_delegates = any(
-        'governed-files.txt' in normalize_token(t) for t in t_agents_raw
-    )
+    # AGENTS 委托判据：全文任意位置引用 governed-files.txt 即视为委托 SSOT
+    # （与 hook 侧判据对齐；「明线规则」段在标准模板中可缺省，
+    #   段落存在且未委托时仍走 parse+compare 检出 drift）
+    agents_content = agents_file.read_text(encoding='utf-8')
+    agents_delegates = 'governed-files.txt' in agents_content
 
     if agents_delegates:
         # AGENTS references SSOT as authoritative → effective match trivially
@@ -202,36 +191,18 @@ def check_gov_consistency() -> int:
     return 0
 
 
-def sync() -> int:
-    """Normal sync: copy AGENTS.md to CLAUDE.md and GEMINI.md."""
-    if not SRC.exists():
-        print(f"missing: {SRC}", file=sys.stderr)
-        return 1
-
-    for target in TARGETS:
-        shutil.copyfile(SRC, target)
-
-    src_hash = md5(SRC)
-    mismatched = [target for target in TARGETS if md5(target) != src_hash]
-    if mismatched:
-        print(f"MD5 mismatch: {[str(path) for path in mismatched]}", file=sys.stderr)
-        return 1
-
-    print(f"synced: {src_hash}")
-    return 0
-
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sync AGENTS.md → CLAUDE.md / GEMINI.md")
+    parser = argparse.ArgumentParser(description="Check governance-boundary consistency (SSOT / AGENTS / hook GOV_PATTERNS)")
     parser.add_argument(
         '--check-gov-consistency', action='store_true',
         help='校验治理文档三方一致性 (SSOT / AGENTS 明线 / hook GOV_PATTERNS)'
     )
     args = parser.parse_args()
 
-    if args.check_gov_consistency:
-        return check_gov_consistency()
-    return sync()
+    if not args.check_gov_consistency:
+        parser.error("--check-gov-consistency is required")
+    return check_gov_consistency()
 
 
 if __name__ == "__main__":

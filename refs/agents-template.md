@@ -18,7 +18,7 @@ Vault/
 │   ├── memory/      # 记忆系统
 │   ├── converge/    # 治理收敛产物(active/→done/)
 │   └── rules/       # 检索与隐私规则
-└── AGENTS.md / CLAUDE.md / GEMINI.md   # 三文件必须一致(改动后跑 sync_agents.py)
+└── AGENTS.md           # 唯一入口（被各类 Agent 框架加载）
 ```
 
 - 新笔记默认落对应类型目录;不要在根目录堆文件
@@ -123,8 +123,6 @@ python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾
 
 模型配置见 `.env`；不得硬编码 key。简化版（`HARNESS_MODE=lite`，默认）零 API：检索主力是 agentic grep/glob + 文件夹导航，LLM 总结/综述由 agent 读文兼任。
 
-> CLAUDE.md / GEMINI.md 由 sync_agents.py 从 AGENTS.md 自动生成，禁止手改（pre-commit hook 强制 MD5 一致）。
-
 ---
 
 ## 治理（Phase 3）
@@ -174,4 +172,3 @@ bootstrap_phase: "phase0"        # 已完成到的 Phase（phase0/1/2/3）；每
 | 跳过记忆检索直接执行任务（用户未豁免） | 先读 MEMORY.md + `ask.py --scope memory` |
 | 手改 MEMORY.md 索引标记段 | 跑 `python .meta/scripts/memory_index.py` |
 | 未经 ultraverge 改治理文档 | 按 `.meta/converge/README.md` 走流程 |
-| 直接编辑 CLAUDE.md / GEMINI.md | 编辑 AGENTS.md 后跑 `python .meta/scripts/sync_agents.py`，三文件 MD5 自动校验 |

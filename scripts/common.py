@@ -108,7 +108,7 @@ EXCLUDE_DIRS = {
 } | _load_privacy_dirs()
 
 EXCLUDE_TOP_FILES = {
-    'AGENTS.md', 'CLAUDE.md', 'GEMINI.md',
+    'AGENTS.md',
     'README.md', '.env', '.env.example', '.gitignore',
 }
 

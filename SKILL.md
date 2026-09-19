@@ -47,8 +47,8 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 | 层 | init-agent-docs 提供 | 本技能叠加 |
 |----|---------------------|-----------|
 | 文档层级 | docs/STRUCTURE.md、plans/、CHANGELOG 脚本化 | docs/CONSTITUTION.md、docs/TAXONOMY.md |
-| 入口 | AGENTS/CLAUDE/GEMINI 三文件同步 | **AGENTS.md 以本技能 `refs/agents-template.md` 为准覆盖**（图书管理员准则 + 维护管线 + bootstrap 状态） |
-| 脚本 | changelog.py / agent_links.py / audit.py | `.meta/scripts/` 全套维护管线（同步机制统一用本技能 sync_agents.py） |
+| 入口 | AGENTS.md 单一入口 | **AGENTS.md 以本技能 `refs/agents-template.md` 为准覆盖**（图书管理员准则 + 维护管线 + bootstrap 状态） |
+| 脚本 | changelog.py / audit.py / check_all.py | `.meta/scripts/` 全套维护管线 |
 | 治理 | ultraverge 判定原则 | converge 单一生命周期落地（`.meta/converge/` + governed-files SSOT） |
 
 ### 已装 init-agent-docs 的检测与复用
@@ -127,16 +127,15 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 2. 拷贝**全部脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐，不分批；简化版/完整版共用同一脚本集，模式只影响运行）
 3. `templates/env.example` → `.env`（设 `HARNESS_MODE=lite`（默认）或 `full`；完整版另填 API key；另有 PRIMARY_HOST + MAINTAIN_CONCURRENCY + OFFICE_EXTRACT_EXTS + 阈值）
 4. `pip install -r requirements.txt`（含 office 提取依赖 python-docx/openpyxl/python-pptx/pypdf）
-5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）
-6. **紧接着**跑 `python .meta/scripts/sync_agents.py`（生成 CLAUDE.md/GEMINI.md）——步骤 5+6 视为一个原子动作：中间中断会造成三文件 MD5 不一致、pre-commit hook 拦截提交；续装时检测到不一致先补跑 sync_agents.py
-7. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）
-8. 按 TAXONOMY.md 创建内容目录（如日记/复盘/收件箱等，名称因用户偏好而异）。若用户使用 Obsidian daily-notes 插件，配置 `.obsidian/daily-notes.json` 指向对应目录
+5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）——AGENTS.md 是唯一入口，不生成任何同步副本
+6. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）
+7. 按 TAXONOMY.md 创建内容目录（如日记/复盘/收件箱等，名称因用户偏好而异）。若用户使用 Obsidian daily-notes 插件，配置 `.obsidian/daily-notes.json` 指向对应目录
 
 > **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / 完整版 API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
 
 ### Phase 1.5 · 宿主护栏（可选，用户确认后装）
 
-把本库已声明的**机械路径规则**硬化到宿主动作侧：隐私目录读禁、从机写禁、CHANGELOG/同步副本编辑重定向、compact 哨兵注入、触发词检索提醒。**护栏只拦机械路径规则，不拦判断**；状态侧（pre-commit）仍是地基，本层是加固而非替代，软规则原文保留。
+把本库已声明的**机械路径规则**硬化到宿主动作侧：隐私目录读禁、从机写禁、CHANGELOG 编辑重定向、compact 哨兵注入、触发词检索提醒。**护栏只拦机械路径规则，不拦判断**；状态侧（pre-commit）仍是地基，本层是加固而非替代，软规则原文保留。
 
 **前提**：Phase 1 已装（`host_guard.py` 随脚本集落位）；Phase 0 隐私目录已经用户确认。
 
@@ -148,13 +147,13 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
    - **Codex**：`templates/host-guardrails/codex-hooks.json` → `.codex/hooks.json`；提示用户需在 Codex `/hooks` 审查信任后生效
    - **其他宿主**：无适配则如实保持软约束，不伪造覆盖
 4. **验证**：`python .meta/scripts/host_guard.py compact-context` 输出 SessionStart JSON；`simulate-host` 模拟从机判定；构造隐私路径 payload 实测 deny/allow（用例形态参考 vault 侧 `.meta/tests/test_host_guard.py`）。
-5. **登记**：AGENTS.md 写明哪些宿主已接线、哪些仍软约束（compact 哨兵段措辞绑定实测结果，实测失败的宿主保持"技术债"原措辞），然后跑 `sync_agents.py`。
+5. **登记**：AGENTS.md 写明哪些宿主已接线、哪些仍软约束（compact 哨兵段措辞绑定实测结果，实测失败的宿主保持"技术债"原措辞）。
 
 ### Phase 2 · 自沉淀（必装）
 
 - 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（MEMORY.md + user/ + feedback/ 骨架；其余子目录按需涌现，不预建。知识库内容由用户笔记目录承担，记忆只存 agent 专属物）
 - MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
-- 填充 AGENTS.md 的「项目记忆」内联段：活跃主题待 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）；替换后跑 `sync_agents.py` 同步三文件
+- 填充 AGENTS.md 的「项目记忆」内联段：活跃主题待 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
 
 ### Phase 3 · 治理（必装）
@@ -169,7 +168,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 1. `python .meta/scripts/maintain.py --full` 成功（简化版：extract_office + index + graph + bm25 + knowledge_map + health + dream；完整版另含 embed ∥ summarize）
 2. `health-report.md` 与 `.index/manifest.md` 生成；若仓库有 office 文档，`.meta/office-extracts/` 有产出
 3. **人审门（交互式）**：agent 引导用户跑一条真实问题检索——简化版用 `ask.py "query"`（自动降级 BM25）或 agentic grep/glob，完整版用语义检索（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
-4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`、`bootstrap_phase` 改 `phase3`，填 `bootstrap_completed_at: <date>`，**重跑 `sync_agents.py`**（任何 AGENTS.md 改动都必须重跑，否则三文件 MD5 漂移、pre-commit hook 拦死后续 commit）
+4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`、`bootstrap_phase` 改 `phase3`，填 `bootstrap_completed_at: <date>`
 
 > **完整版才受 API key 门控**：简化版无 LLM 步骤，`maintain.py --full` 不依赖 API key 即可判 completed。决策点 ③ 选了完整版但 ④ 选"稍后自填"的仓库，LLM 步骤必然失败——保持 `in_progress`（或回退 lite）并在 kb-bootstrap-decisions.md 注明阻塞原因，key 配好后重跑完成判定。
 
@@ -215,7 +214,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | 脚本 | 功能 |
 |------|------|
 | `common.py` | 公共库：env 加载 / API client（含跨线程全局限速）/ 扫描与排除 / office 与并发配置 / 链接解析 / git 包装 |
-| `sync_agents.py` | AGENTS.md → CLAUDE.md/GEMINI.md 三文件同步（MD5 校验） |
+| `check_gov_consistency.py` | 治理边界一致性校验（SSOT / AGENTS 明线 / hook GOV_PATTERNS 三方比对；bootstrap 同批 staged 时豁免）；pre-commit 第 9 段在治理边界文件变更时自动触发 |
 | `memory_index.py` | MEMORY.md 记忆索引自动重建（硬约束，索引标记段禁止手改）；`--check` 供 pre-commit 校验 |
 | `detect_renames.py` | 重命名检测（git + hash 双通道），迁移伴生元数据 |
 | `check_sidecar_sources.py` | 校验/修复 `.meta/{summaries,links,tags}/` sidecar 的 source 字段 |
@@ -246,7 +245,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `.opencode/plugins/kb-guard.js` | **覆盖** | 以 skill bundle 为准（Phase 1.5） |
 | `.meta/converge/` `.meta/memory/` 内容 | **跳过若存在**（只补缺失的 README/骨架） | 持久型，含收敛证据与记忆 |
 | `.meta/office-extracts/` | 由 extract_office.py 按 hash 增量管理 | 派生型 |
-| `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；legacy 旧版兼容直接覆盖为新模板，详见旧版兼容段；覆盖后跑 sync_agents.py） | 内联段含用户自由文本不可重建；其余为机械规则随模板 |
+| `AGENTS.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；legacy 旧版兼容直接覆盖为新模板，详见旧版兼容段） | 内联段含用户自由文本不可重建；其余为机械规则随模板；AGENTS.md 是唯一入口，不存在同步副本 |
 
 ### bootstrap_phase 状态记录
 
@@ -256,7 +255,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 0. **先检测仓库根是否存在旧名 `kb-bootstrap-plan.md`**（v0.5.7 前生成）→ 存在则重命名为 `kb-bootstrap-decisions.md`（决策记录不丢，仅文件名变更）
 1. 读目标仓库 AGENTS.md 的 `bootstrap_status` 与 `bootstrap_phase`，按下方分支处理：
 - `bootstrap_status: in_progress` → 从 `bootstrap_phase` 的下一个 Phase 续装
-- `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"；若升级 bundle 脚本，AGENTS.md 按幂等表"条件覆盖"处理：① 读旧 AGENTS.md 的「项目记忆」内联段已填内容并备份；② 用新模板覆盖 AGENTS.md；③ 把备份内联段填回新模板对应位置（勿重置为占位符）；④ 若新模板内联段结构跨版本变更（增删字段/改名），须显式给出迁移映射，不能机械填回；⑤ 跑 sync_agents.py 同步 CLAUDE/GEMINI
+- `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"；若升级 bundle 脚本，AGENTS.md 按幂等表"条件覆盖"处理：① 读旧 AGENTS.md 的「项目记忆」内联段已填内容并备份；② 用新模板覆盖 AGENTS.md；③ 把备份内联段填回新模板对应位置（勿重置为占位符）；④ 若新模板内联段结构跨版本变更（增删字段/改名），须显式给出迁移映射，不能机械填回
 - 无 `bootstrap_status` 字段（首次）→ 从 Phase 0 开始
 - 已存在 `kb-bootstrap-decisions.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
 
@@ -267,7 +266,14 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 - 检测到旧版脚本 `maintain-lite.py` → 替换为 `maintain.py`，拷入全量脚本
 - `.meta/deliberations/` 或 audit 历史内容原地保留，在其 README 标注"只读证据归档，禁止新增"
 - 治理统一走 `.meta/converge/`
-- `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`：**覆盖前提示用户**——"检测到旧版 AGENTS.md，将被 v0.5+ 新模板覆盖（含「项目记忆」内联段占位符）；非内联段区域的用户定制将丢失（git 历史可恢复）；CLAUDE/GEMINI 存在则覆盖、不存在则随 AGENTS.md 新建"；确认后覆盖为新模板，按 Phase 2 流程填充内联段 + 跑 `sync_agents.py`。**覆盖安全依据**：旧版无内联段→不丢失内联段自由文本（独立第三场景，非 in_progress 语义）；非内联段区域按模板权威原则覆盖（幂等表理由栏）；不走 completed 升级流程的①备份③填回④迁移映射（旧版无内联段，跳过这三步）
+- `AGENTS.md`：**覆盖前提示用户**——"检测到旧版 AGENTS.md，将被新模板覆盖（含「项目记忆」内联段占位符）；非内联段区域的用户定制将丢失（git 历史可恢复）"；确认后覆盖为新模板，按 Phase 2 流程填充内联段。**覆盖安全依据**：旧版无内联段→不丢失内联段自由文本（独立第三场景，非 in_progress 语义）；非内联段区域按模板权威原则覆盖（幂等表理由栏）；不走 completed 升级流程的①备份③填回④迁移映射（旧版无内联段，跳过这三步）
+- **三文件体系清退（旧版安装必做）**：检测到 `CLAUDE.md` / `GEMINI.md` 同步副本、`.meta/scripts/sync_agents.py` 或 pre-commit hook 内嵌的三文件 MD5 检查段时，按以下步骤清退：
+  1. 直接删除两副本（内容已并入 AGENTS.md 模板；单一入口下保留只会制造两处维护与漂移）；
+  2. 删除 `.meta/scripts/sync_agents.py`（治理一致性校验由 `check_gov_consistency.py` 承接）；
+  3. hook 换装：用 `refs/pre-commit-template` 统一版**整体覆盖**目标仓库 `.githooks/pre-commit`（不再含 MD5 段——脚本已删而 hook 仍调用会卡死提交路径），覆盖后 `bash -n .githooks/pre-commit` 自检，并确认 `git config core.hooksPath .githooks` 已接线；
+  4. 验证：`python .meta/scripts/check_gov_consistency.py --check-gov-consistency` 应通过（治理边界三方一致；此后 pre-commit 第 9 段自动把关）；
+  5. 用 `changelog_append.py` 记一条迁移条目（标题建议「三文件体系清退，统一 AGENTS.md 单一入口」，正文列出删除的文件与 hook 变更）；
+  6. **习惯废止告知（须向用户明说）**：原「改完 AGENTS.md 跑 sync_agents.py」的习惯动作随脚本删除而废止——AGENTS.md 是唯一入口，保存即生效，无任何同步步骤。
 
 ---
 
@@ -275,10 +281,10 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ```
 target-vault/
-├── AGENTS.md / CLAUDE.md / GEMINI.md        ← 本技能模板（图书管理员准则 + 并行准则 + 维护管线 + 提交策略）
+├── AGENTS.md                                   ← 本技能模板（唯一入口；图书管理员准则 + 并行准则 + 维护管线 + 提交策略）
 ├── <内容目录>/                               ← 按 TAXONOMY.md 定义（日记/复盘/收件箱/工作流等,名称因用户偏好而异）
 ├── .env                                      ← 从 env.example 填充（HARNESS_MODE=lite 默认；完整版另填 API key）
-├── .githooks/pre-commit                      ← 统一版 hook（plan status + converge 路径 + GOV 提醒 + key/隐私/MD5 + MEMORY.md 索引一致性）
+├── .githooks/pre-commit                      ← 统一版 hook（plan status + converge 路径 + GOV 提醒 + key/隐私 + MEMORY.md 索引一致性）
 ├── docs/
 │   ├── STRUCTURE.md / plans/ / CURRENT.md    ← init-agent-docs 打底（若装）
 │   ├── CONSTITUTION.md                       ← 三元原则 + 持久性四型 + 多轴门控 + converge 生命周期

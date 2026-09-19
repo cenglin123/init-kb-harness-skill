@@ -9,8 +9,8 @@
 #   5. 治理文档变更提醒（读 .meta/governed-files.txt SSOT，存在则用、不存在跳过）
 #   6. API key 泄露扫描
 #   7. 隐私目录写入拦截（若 category-privacy.md 定义）
-#   8. 三文件一致性（AGENTS/CLAUDE/GEMINI MD5）
-#   9. MEMORY.md 记忆索引一致性（硬约束：索引由 memory_index.py 自动维护）
+#   8. MEMORY.md 记忆索引一致性（硬约束：索引由 memory_index.py 自动维护）
+#   9. 治理边界一致性校验（SSOT / AGENTS / hook 三方比对，check_gov_consistency.py）
 #
 # 实现要点：
 #   - GOV 检测读 .meta/governed-files.txt（SSOT，每行一个 glob）
@@ -179,40 +179,7 @@ if [ -n "$PRIVACY_DIRS_LIST" ]; then
     fi
 fi
 
-# ─── 8. 三文件一致性（AGENTS/CLAUDE/GEMINI MD5） ───
-AGENTS_FILE="AGENTS.md"
-CLAUDE_FILE="CLAUDE.md"
-GEMINI_FILE="GEMINI.md"
-
-if [ ! -f "$AGENTS_FILE" ] || [ ! -f "$CLAUDE_FILE" ] || [ ! -f "$GEMINI_FILE" ]; then
-    exit 0
-fi
-
-if command -v md5sum &> /dev/null; then
-    AGENTS_MD5=$(md5sum "$AGENTS_FILE" | cut -d' ' -f1)
-    CLAUDE_MD5=$(md5sum "$CLAUDE_FILE" | cut -d' ' -f1)
-    GEMINI_MD5=$(md5sum "$GEMINI_FILE" | cut -d' ' -f1)
-elif command -v md5 &> /dev/null; then
-    AGENTS_MD5=$(md5 -q "$AGENTS_FILE")
-    CLAUDE_MD5=$(md5 -q "$CLAUDE_FILE")
-    GEMINI_MD5=$(md5 -q "$GEMINI_FILE")
-else
-    exit 0
-fi
-
-if [ "$AGENTS_MD5" != "$CLAUDE_MD5" ] || [ "$AGENTS_MD5" != "$GEMINI_MD5" ]; then
-    echo "⚠️  Git commit 被拒绝"
-    echo ""
-    echo "AGENTS.md、CLAUDE.md、GEMINI.md 三个文件的内容不一致。"
-    echo ""
-    echo "正确的流程："
-    echo "  1. 编辑 AGENTS.md（不要编辑 CLAUDE.md 或 GEMINI.md）"
-    echo "  2. 运行：python .meta/scripts/sync_agents.py"
-    echo "  3. 再次提交"
-    exit 1
-fi
-
-# ─── 9. MEMORY.md 记忆索引一致性（硬拦截） ───
+# ─── 8. MEMORY.md 记忆索引一致性（硬拦截） ───
 # 记忆索引由 memory_index.py 自动维护，不允许依赖 agent 手动更新。
 # .meta/memory/** 有变更时，MEMORY.md 索引段必须与磁盘实际内容一致。
 MEMORY_CHANGED=0
@@ -230,6 +197,24 @@ if [ "$MEMORY_CHANGED" -eq 1 ] && [ -f ".meta/scripts/memory_index.py" ] && [ -f
         echo "记忆索引是脚本自动维护的硬约束。请先运行："
         echo "  python .meta/scripts/memory_index.py && git add .meta/memory/MEMORY.md"
         echo "再重新提交。"
+        exit 1
+    fi
+fi
+
+# ─── 9. 治理边界一致性校验（硬拦截；bootstrap 同批 staged 豁免由脚本内置） ───
+# SSOT / AGENTS.md / hook 任一变更时，三方治理边界必须一致。
+GOV_BOUNDARY_CHANGED=0
+while IFS= read -r path; do
+    case "$path" in
+        .meta/governed-files.txt|AGENTS.md|.githooks/pre-commit) GOV_BOUNDARY_CHANGED=1 ;;
+    esac
+done <<< "$STAGED_FILES"
+
+if [ "$GOV_BOUNDARY_CHANGED" -eq 1 ] && [ -f ".meta/scripts/check_gov_consistency.py" ]; then
+    if ! python .meta/scripts/check_gov_consistency.py --check-gov-consistency; then
+        echo ""
+        echo "⚠️  Git commit 被拒绝：治理边界三方不一致（SSOT / AGENTS 明线 / hook GOV_PATTERNS）。"
+        echo "以 .meta/governed-files.txt（机械 SSOT）为准对齐三方后重新提交。"
         exit 1
     fi
 fi

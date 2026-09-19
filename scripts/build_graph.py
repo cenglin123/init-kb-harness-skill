@@ -60,7 +60,7 @@ ARCHIVE_KEYWORDS = tuple(
     m.strip() for m in _os.environ.get('ARCHIVE_MARKERS', '归档').split(',') if m.strip()
 ) or ('归档',)
 CLIP_JUNK_TARGETS = {'↩', 'link', 'PDF', 'HTML'}
-META_DOC_FILES = {'AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'README.md', 'CHANGELOG.md'}
+META_DOC_FILES = {'AGENTS.md', 'README.md', 'CHANGELOG.md'}
 
 # ─── 正则 ─────────────────────────────────────────────────────────────────────
 

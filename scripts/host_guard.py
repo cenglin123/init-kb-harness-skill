@@ -73,13 +73,6 @@ _CHANGELOG_DENY = {
     "correct_entry": "python .meta/scripts/changelog_append.py",
 }
 
-# CLAUDE.md / GEMINI.md 直改 deny
-_AGENTS_SYNC_DENY = {
-    "reason": "CLAUDE.md/GEMINI.md 直改被拦截",
-    "rule_ref": "AGENTS.md 约束速查表",
-    "correct_entry": "编辑 AGENTS.md 后运行 python .meta/scripts/sync_agents.py",
-}
-
 # compact 哨兵文本
 _COMPACT_TEXT = (
     "【compact 恢复·强制自检】你刚从压缩恢复。"
@@ -357,8 +350,6 @@ def _check_edit_redirect(
     for p in paths:
         if p == "docs/CHANGELOG.md":
             return make_deny_output(**_CHANGELOG_DENY)
-        if p in ("CLAUDE.md", "GEMINI.md"):
-            return make_deny_output(**_AGENTS_SYNC_DENY)
     return None
 
 
