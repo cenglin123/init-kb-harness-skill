@@ -113,6 +113,9 @@ python .meta/scripts/ask.py --check "主题"      # 写前查重
 python .meta/scripts/ask.py --orphans           # 孤儿清单
 python .meta/scripts/ask.py --scope memory "query"  # 记忆系统检索
 python .meta/scripts/memory_index.py            # 重建 MEMORY.md 记忆索引（索引硬约束）
+python .meta/scripts/docs_maintain.py --check   # 只读文档审计与 30 天审计提醒（maintain 管线自动调用）
+python .meta/scripts/check_all.py --quiet       # 完工机械检查
+python .meta/scripts/changelog.py titles --limit 5  # CHANGELOG 局部读取
 python .meta/scripts/whoami.py                  # 模型自检
 python .meta/scripts/whoami.py --frontmatter    # 溯源 YAML（agent/model/generated_at；WHOAMI_AGENT env 可显式指定宿主）
 # 以下仅完整版（HARNESS_MODE=full 且已配 API key）：

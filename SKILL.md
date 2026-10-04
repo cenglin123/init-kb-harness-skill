@@ -1,6 +1,6 @@
 ---
 name: init-kb-harness
-description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Default install is the simplified (lite) mode — zero API / zero embedding database; retrieval via agentic grep/glob + local BM25 + graph/backlinks. Full mode (Zhipu embeddings + DeepSeek summarize/rerank) is an opt-in upgrade. Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Not for vaults that already have a `.meta/scripts/` harness.
+description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Default install is the simplified (lite) mode — zero API / zero embedding database; retrieval via agentic grep/glob + local BM25 + graph/backlinks. Full mode (Zhipu embeddings + DeepSeek summarize/rerank) is an opt-in upgrade. Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Existing harnesses use only the explicit agent-docs layout migration when requested; do not rebootstrap them.
 ---
 
 # init-kb-harness · 知识库 Harness 引导器
@@ -53,7 +53,10 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 ### 已装 init-agent-docs 的检测与复用
 
-Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`、`scripts/changelog.py` 等 init-agent-docs 产物 → **复用不重铺**（docs/ 层级保留；CHANGELOG 脚本以已装者为准，不重复装 changelog_append.py 的等价物）；未装 → 先调用 init-agent-docs 完成打底再继续。
+Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`、`scripts/changelog.py` 或 `.meta/scripts/changelog.py` 等 init-agent-docs 产物 → **复用不重铺**（docs/ 层级保留；CHANGELOG 脚本以已装者为准，不重复装 changelog_append.py 的等价物）；未装 → 先调用 init-agent-docs 完成打底再继续。
+
+**知识库路径统一是叠加步骤，不是删除“从机残骸”**：所有维护脚本最终在 `.meta/scripts/`，记忆内容与索引入口只在 `.meta/memory/`。打底后、拷 KB 脚本前按 [refs/agent-docs-layout.md](refs/agent-docs-layout.md) 迁移：保留 changelog/audit/check_all；文档维护器改名 docs_maintain.py 接入 KB maintain，索引只由 memory_index.py 写。仅处理已识别资产；不删除整个 `.agents/`。已有 completed 库明确请求此布局迁移时只走该参考流程，不重跑隐私/API 问答、不覆盖库内用户规则。
+
 
 ---
 
@@ -62,7 +65,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 - 用户要把一个普通 Obsidian vault 变成"自维护的 second brain"
 - 仓库以 office 文档（xlsx/docx/pptx/pdf）为主、.md 很少——本技能的提取管线正对此设计
 - 关键词：「装知识库系统」「bootstrap harness」「init knowledge base」「给这个仓库建立维护体系」
-- **不适用**：vault 已有 `.meta/scripts/maintain*.py`（已装过 harness）；纯代码仓库（非知识库）
+- **不适用全量 bootstrap**：vault 已有 `.meta/scripts/maintain*.py`（已装过 harness）；已有库仅在用户请求时执行上述布局迁移。纯代码仓库不适用。
 
 ---
 
@@ -83,7 +86,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 ### 记忆系统双硬约束
 
 1. **任务执行前必查记忆**：目标仓库 AGENTS.md（`refs/agents-template.md`）必须包含硬要求——agent 接到任务后、执行前必须先检索记忆系统（读 `.meta/memory/MEMORY.md` 索引 + `ask.py --scope memory`），查看可能的过往经验；唯一豁免是用户当次明确说不必要。
-2. **MEMORY.md 索引脚本自动维护**：`scripts/memory_index.py` 扫描 `.meta/memory/` 下所有子目录自动重建 MEMORY.md 索引标记段（`<!-- memory-index:start/end -->`，段内禁止手改），自动展示各分类当前全部条目。三层强制：maintain.py 每次维护自动重建 + pre-commit hook 拦截过期索引提交 + `--check` 模式供校验。**不允许依赖 agent 记得手动维护索引。**
+2. **MEMORY.md 索引脚本自动维护**：`.meta/scripts/memory_index.py` 扫描 `.meta/memory/` 下所有子目录与 `docs/problems/bugfix/` 经验自动重建 MEMORY.md 索引标记段（`<!-- memory-index:start/end -->`，段内禁止手改），自动展示各分类当前全部条目。三层强制：maintain.py 每次维护自动重建 + pre-commit hook 拦截过期索引提交 + `--check` 模式供校验。**不允许依赖 agent 记得手动维护索引。**
 
 ### 三自循环 ↔ CONSTITUTION 第零部四目标
 
@@ -124,7 +127,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 **这是"容忍必要体系建立"的核心阶段。** 装完即可自维护。
 
 1. 检测/调用 `init-agent-docs` 打底（见上方"已装检测与复用"；若它生成 AGENTS.md，随后由本技能模板覆盖）
-2. 拷贝**全部脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐，不分批；简化版/完整版共用同一脚本集，模式只影响运行）
+2. 先完成 [agent-docs 布局迁移](refs/agent-docs-layout.md)，再拷贝**全部 KB 脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐；已有 changelog.py 时不再部署等价 changelog_append.py；保留 docs_maintain.py/audit.py/check_all.py，简化版/完整版共用脚本集）
 3. `templates/env.example` → `.env`（设 `HARNESS_MODE=lite`（默认）或 `full`；完整版另填 API key；另有 PRIMARY_HOST + MAINTAIN_CONCURRENCY + OFFICE_EXTRACT_EXTS + 阈值）
 4. `pip install -r requirements.txt`（含 office 提取依赖 python-docx/openpyxl/python-pptx/pypdf）
 5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）——AGENTS.md 是唯一入口，不生成任何同步副本
@@ -151,7 +154,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ### Phase 2 · 自沉淀（必装）
 
-- 拷贝 `templates/memory-scaffold/` 到 `.meta/memory/`（MEMORY.md + user/ + feedback/ 骨架；其余子目录按需涌现，不预建。知识库内容由用户笔记目录承担，记忆只存 agent 专属物）
+- 仅补齐 `templates/memory-scaffold/` 中缺失文件到 `.meta/memory/`，不得覆盖 Phase 1 已迁并的自由文本、角色与记忆（MEMORY.md + user/ + feedback/ 骨架；其余子目录按需涌现，不预建。知识库内容由用户笔记目录承担，记忆只存 agent 专属物）
 - MEMORY.md 的"当前记忆条目"索引段由 `memory_index.py` 自动维护（见上方"记忆系统双硬约束"）；拷入后立即跑 `python .meta/scripts/memory_index.py` 生成首版索引
 - 填充 AGENTS.md 的「项目记忆」内联段：活跃主题待 vault 使用后自然涌现，bootstrap 阶段写"待补"；用户称呼 / 关键偏好需向用户补问一句后填入（勿留未替换的方括号占位符、勿臆造）
 - Phase 2 的脚本（dream / semantic_lint / synthesize / knowledge_map / bm25_index）已随 Phase 1 拷入，此处无脚本动作
@@ -215,12 +218,13 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 |------|------|
 | `common.py` | 公共库：env 加载 / API client（含跨线程全局限速）/ 扫描与排除 / office 与并发配置 / 链接解析 / git 包装 |
 | `check_gov_consistency.py` | 治理边界一致性校验（SSOT / AGENTS 明线 / hook GOV_PATTERNS 三方比对；bootstrap 同批 staged 时豁免）；pre-commit 第 9 段在治理边界文件变更时自动触发 |
+| `docs_maintain.py` / `audit.py` / `check_all.py` / `changelog.py` | 从 init-agent-docs 源重定位；文档审计、定期提醒、完工检查和 CHANGELOG；docs_maintain 委托唯一 memory_index |
 | `memory_index.py` | MEMORY.md 记忆索引自动重建（硬约束，索引标记段禁止手改）；`--check` 供 pre-commit 校验 |
 | `detect_renames.py` | 重命名检测（git + hash 双通道），迁移伴生元数据 |
 | `check_sidecar_sources.py` | 校验/修复 `.meta/{summaries,links,tags}/` sidecar 的 source 字段 |
 | `host_guard.py` | 宿主护栏动态门禁（**Phase 1.5 选用**，不配 hook 则为无害闲置）：pre-tool 判定（隐私读禁/从机写禁/编辑重定向）、prompt 触发词提醒、compact-context 注入文本、simulate-host dry-run；策略源 `.meta/rules/host-write-policy.json` |
 | `inbox_scan.py` | 收件箱扫描 + LLM 归类建议（health_report 调用） |
-| `changelog_append.py` | CHANGELOG 条目脚本化插入 |
+| `changelog_append.py` | 旧库兼容追加器；已有 agent-docs changelog.py 时不部署 |
 | `check_plan_status.py` | docs/plans 路径与 frontmatter status 一致性（pre-commit 调用） |
 
 > maintain.py 的 workflow frequency 步骤依赖 `search_sessions.py`（vault 特化脚本，bundle 不含）——缺失时自动跳过并告警。
@@ -233,7 +237,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 | 文件类 | 重跑行为 | 理由 |
 |--------|---------|------|
-| `scripts/*.py`（含 maintain.py） | **覆盖**（以 skill bundle 为准） | 脚本是机械产物，以 skill bundle 为准覆盖 |
+| `.meta/scripts/*.py`（含 KB maintain.py） | **覆盖**（以 skill bundle 为准） | 脚本是机械产物，以 skill bundle 为准覆盖 |
+| 旧 `scripts/` / `.agents/memory/` | 按迁移清单逐项处理；成功后重跑只校验，不重复追加记忆；未知内容保留并报告 | 备份、冲突处理及验证见 agent-docs-layout.md；不删除 `.agents/skills` 等其他资产 |
 | `refs/` 模板（constitution/agents/pre-commit/converge-readme） | **覆盖** | 模板随 skill 演进 |
 | `.env` | **跳过若存在** | 含用户 API key / PRIMARY_HOST / 阈值，覆盖会清掉用户配置 |
 | `.meta/rules/category-privacy.md` | **跳过若存在** | Phase 0 嗅探结果 + 用户人审，不可覆盖 |
@@ -272,7 +277,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
   2. 删除 `.meta/scripts/sync_agents.py`（治理一致性校验由 `check_gov_consistency.py` 承接）；
   3. hook 换装：用 `refs/pre-commit-template` 统一版**整体覆盖**目标仓库 `.githooks/pre-commit`（不再含 MD5 段——脚本已删而 hook 仍调用会卡死提交路径），覆盖后 `bash -n .githooks/pre-commit` 自检，并确认 `git config core.hooksPath .githooks` 已接线；
   4. 验证：`python .meta/scripts/check_gov_consistency.py --check-gov-consistency` 应通过（治理边界三方一致；此后 pre-commit 第 9 段自动把关）；
-  5. 用 `changelog_append.py` 记一条迁移条目（标题建议「三文件体系清退，统一 AGENTS.md 单一入口」，正文列出删除的文件与 hook 变更）；
+  5. 优先用 `.meta/scripts/changelog.py add`（旧库仅有 changelog_append.py 时沿用它）记一条迁移条目（标题建议「三文件体系清退，统一 AGENTS.md 单一入口」，正文列出删除的文件与 hook 变更）；
   6. **习惯废止告知（须向用户明说）**：原「改完 AGENTS.md 跑 sync_agents.py」的习惯动作随脚本删除而废止——AGENTS.md 是唯一入口，保存即生效，无任何同步步骤。
 
 ---

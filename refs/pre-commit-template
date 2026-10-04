@@ -16,7 +16,7 @@
 #   - GOV 检测读 .meta/governed-files.txt（SSOT，每行一个 glob）
 #   - 治理走 converge + fresh verifier：执行前 converge 收敛、执行后 fresh verifier 验收
 
-STAGED_FILES=$(git diff --cached --name-only)
+STAGED_FILES=$(git -c core.quotepath=false diff --cached --name-only)
 
 # ─── 1. plan status 检查（依赖 check_plan_status.py；脚本缺失时跳过） ───
 PLAN_STATUS_CHECK_NEEDED=0
@@ -181,15 +181,19 @@ fi
 
 # ─── 8. MEMORY.md 记忆索引一致性（硬拦截） ───
 # 记忆索引由 memory_index.py 自动维护，不允许依赖 agent 手动更新。
-# .meta/memory/** 有变更时，MEMORY.md 索引段必须与磁盘实际内容一致。
+# .meta/memory/** 或 docs/problems/bugfix/** 有变更时校验唯一索引。
 MEMORY_CHANGED=0
 while IFS= read -r path; do
     case "$path" in
-        .meta/memory/*) MEMORY_CHANGED=1 ;;
+        .meta/memory/*|docs/problems/bugfix/*) MEMORY_CHANGED=1 ;;
     esac
 done <<< "$STAGED_FILES"
 
-if [ "$MEMORY_CHANGED" -eq 1 ] && [ -f ".meta/scripts/memory_index.py" ] && [ -f ".meta/memory/MEMORY.md" ]; then
+if [ "$MEMORY_CHANGED" -eq 1 ]; then
+    if [ ! -f ".meta/scripts/memory_index.py" ]; then
+        echo "Git commit 被拒绝：记忆索引维护脚本缺失"
+        exit 1
+    fi
     if ! python .meta/scripts/memory_index.py --check; then
         echo ""
         echo "⚠️  Git commit 被拒绝：MEMORY.md 记忆索引过期"
