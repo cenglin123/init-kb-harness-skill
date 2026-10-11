@@ -57,6 +57,14 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 **知识库路径统一是叠加步骤，不是删除“从机残骸”**：所有维护脚本最终在 `.meta/scripts/`，记忆内容与索引入口只在 `.meta/memory/`。打底后、拷 KB 脚本前按 [refs/agent-docs-layout.md](refs/agent-docs-layout.md) 迁移：保留 changelog/audit/check_all；文档维护器改名 docs_maintain.py 接入 KB maintain，索引只由 memory_index.py 写。仅处理已识别资产；不删除整个 `.agents/`。已有 completed 库明确请求此布局迁移时只走该参考流程，不重跑隐私/API 问答、不覆盖库内用户规则。
 
+### 可选 worktree 协作桥接
+
+知识库可选择沿用 init-agent-docs 的跨工具任务登记约定。仅在目标是 Git 仓库且用户选择启用时安装或保留；新库把通用 helper 放在 `.meta/scripts/worktree_task.py`，状态登记复用 Git common-dir 下的同一 registry。KB 不复制第二份 runtime，不安装强制 hook，也不要求固定任务分类、宿主专属分支前缀或自动通知。具体动作与参数以 helper 的 `--help` 为准。
+
+不启用、没有 Git，或当前任务只是只读检索/评审时，不创建 task worktree 或登记状态。任务显示名由用户/agent 在创建时输入一次，后续沿用 helper 派生的稳定 ID、分支和目录；恢复任务按 ID、owner 与 generation 定位，不按最近修改时间猜测。
+
+协作登记是跨工具共享的软约定。agent 可先做一致性检查并在身份或任务状态无法对应时拒绝继续，但这不构成系统安全边界，不能拦截直接文件编辑、手工 Git、旧版 CLI、其他 clone 或任意 GUI 操作。owner 字段只是声明，不是身份认证；内容摘要也不证明语义正确。registry 只在同一 Git common-dir 的 linked worktree 间共享，不会自动同步到另一 clone 或设备。主从权限始终优先于 task owner：从机可只读列出、检查或评审任务；从机不得创建 task worktree、写 registry 或执行 Git 写命令。worktree 只隔离 Git 文件，不隔离共享数据库、派生维护和部署；需要这些写入时由主机在主工作树整合并统一执行。
+
 
 ---
 
@@ -118,20 +126,21 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
    | ② | taxonomy | TAXONOMY.md 草案要点 | a) 接受 b) 用户口述调整、agent 改后再示 c) 留 draft 以后再定 |
    | ③ | 安装模式 | 仓库画像 + rubric 提示 + 两模式能力对照（见"安装模式"节） | a) **简化版（默认）**：零 API、agentic grep/glob + BM25 + 文件夹管理 b) 完整版：加 embedding 库 + DeepSeek 总结/合成/精排（需 API key）c) 极小仓库先攒内容、暂不 bootstrap |
    | ④ | API 配置（**仅决策点 ③ 选完整版时进行**） | env 字段清单（必填：DeepSeek/智谱 key；可选：PRIMARY_HOST） | a) 现在提供（贴入对话或用户自行编辑 .env）b) 稍后自填（骨架照装、HARNESS_MODE 暂留 lite，LLM 步骤不可跑） |
+   | ⑤ | worktree 协作桥接（**仅目标是 Git 仓库时询问**） | 说明跨工具任务登记、隔离和范围协调用途 | a) 启用：复用 init-agent-docs helper，按需为复杂/并行任务建 task worktree b) 不启用：保留普通 agent 工作流，不安装 helper；非 Git 仓库自动记为不适用 |
 
-   每步的用户选择**记录进 `kb-bootstrap-decisions.md`**（定位：**执行记录**——记下每步选项、选择结果、日期）。
-6. **四个决策点全部有结果 → 直接进入 Phase 1**。中断后重触发时读 plan 中的决策记录，问用户"沿用历史决策 / 重新决策"。
+   每步的用户选择**记录进 `kb-bootstrap-decisions.md`**（定位：**执行记录**——记下每步选项、选择结果）。
+6. **所有适用决策点都有结果 → 直接进入 Phase 1**。中断后重触发时沿用 `kb-bootstrap-decisions.md` 中已确认的选择；只在用户明确要求重选时才重新询问，不重复确认已有协作桥接选择。
 
 ### Phase 1 · 骨架 + 检索 + Office 提取（必装）
 
 **这是"容忍必要体系建立"的核心阶段。** 装完即可自维护。
 
-1. 检测/调用 `init-agent-docs` 打底（见上方"已装检测与复用"；若它生成 AGENTS.md，随后由本技能模板覆盖）
-2. 先完成 [agent-docs 布局迁移](refs/agent-docs-layout.md)，再拷贝**全部 KB 脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐；已有 changelog.py 时不再部署等价 changelog_append.py；保留 docs_maintain.py/audit.py/check_all.py，简化版/完整版共用脚本集）
+1. 检测/调用 `init-agent-docs` 打底（见上方"已装检测与复用"）。覆盖 AGENTS.md 前，读取现有协作路由、用户改写的任务范围约定，以及 `kb-bootstrap-decisions.md` 中对此桥接的选择；沿用已确认的决定，不重复询问。先保留已启用协作约定及用户调整，再与本模板合并。
+2. 先完成 [agent-docs 布局迁移](refs/agent-docs-layout.md)，再拷贝**全部 KB 脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐；已有 changelog.py 时不再部署等价 changelog_append.py；保留 docs_maintain.py/audit.py/check_all.py，简化版/完整版共用脚本集）。用户选择启用协作桥接且目标是 Git 仓库时，从新版 init-agent-docs `assets/scripts/` 安装或复用唯一的 `worktree_task.py`；不另建 helper 副本或 hook
 3. `templates/env.example` → `.env`（设 `HARNESS_MODE=lite`（默认）或 `full`；完整版另填 API key；另有 PRIMARY_HOST + MAINTAIN_CONCURRENCY + OFFICE_EXTRACT_EXTS + 阈值）
 4. `pip install -r requirements.txt`（含 office 提取依赖 python-docx/openpyxl/python-pptx/pypdf）
-5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）——AGENTS.md 是唯一入口，不生成任何同步副本
-6. 安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并**接线**：`git config core.hooksPath .githooks`（不配则 hook 静默永不触发）。依赖 Git Bash（Git for Windows 自带；纯 GitHub Desktop/TortoiseGit 无 bash 环境需另装）
+5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）——AGENTS.md 是唯一入口，不生成任何同步副本。仅当目标是 Git 仓库且用户选择启用时，加入或合并可选协作段并安装唯一 helper；否则移除模板中的可选协作段，不装该 helper。替换模板时保留已确认的协作约定、用户自定义任务范围规则及其决定记录，不静默丢弃。
+6. 仅在目标仓库有 Git 时，安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并接线：`git config core.hooksPath .githooks`。没有 Git 时不安装或接线 hook，也不安装协作 helper；Git Bash 缺失时按下方前置缺失交互处理。
 7. 按 TAXONOMY.md 创建内容目录（如日记/复盘/收件箱等，名称因用户偏好而异）。若用户使用 Obsidian daily-notes 插件，配置 `.obsidian/daily-notes.json` 指向对应目录
 
 > **安装中的交互引导**：机械步骤遇前置缺失（无 Python / 无 Git Bash / 完整版 API key 未填 / office 依赖装不上）不当场失败，给用户选项：a) 现在补齐 b) 跳过该件继续（明确标注后果，如 hook 不生效、LLM 步骤暂不可跑、office 内容暂不可检索）c) 中止，处理后再续。选择记录进 `kb-bootstrap-decisions.md`。
@@ -250,7 +259,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `.opencode/plugins/kb-guard.js` | **覆盖** | 以 skill bundle 为准（Phase 1.5） |
 | `.meta/converge/` `.meta/memory/` 内容 | **跳过若存在**（只补缺失的 README/骨架） | 持久型，含收敛证据与记忆 |
 | `.meta/office-extracts/` | 由 extract_office.py 按 hash 增量管理 | 派生型 |
-| `AGENTS.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级时保留内联段，详见下方升级流程；legacy 旧版兼容直接覆盖为新模板，详见旧版兼容段） | 内联段含用户自由文本不可重建；其余为机械规则随模板；AGENTS.md 是唯一入口，不存在同步副本 |
+| `AGENTS.md` | **条件覆盖**（in_progress rerun 按 Phase 续装；completed 升级保留内联段及已存在的可选协作约定，详见下方升级流程；legacy 旧版兼容直接覆盖为新模板，详见旧版兼容段） | 内联段含用户自由文本不可重建；可选协作约定按现状合并或保留；其余为机械规则随模板；AGENTS.md 是唯一入口，不存在同步副本 |
 
 ### bootstrap_phase 状态记录
 
@@ -260,7 +269,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 0. **先检测仓库根是否存在旧名 `kb-bootstrap-plan.md`**（v0.5.7 前生成）→ 存在则重命名为 `kb-bootstrap-decisions.md`（决策记录不丢，仅文件名变更）
 1. 读目标仓库 AGENTS.md 的 `bootstrap_status` 与 `bootstrap_phase`，按下方分支处理：
 - `bootstrap_status: in_progress` → 从 `bootstrap_phase` 的下一个 Phase 续装
-- `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"；若升级 bundle 脚本，AGENTS.md 按幂等表"条件覆盖"处理：① 读旧 AGENTS.md 的「项目记忆」内联段已填内容并备份；② 用新模板覆盖 AGENTS.md；③ 把备份内联段填回新模板对应位置（勿重置为占位符）；④ 若新模板内联段结构跨版本变更（增删字段/改名），须显式给出迁移映射，不能机械填回
+- `bootstrap_status: completed` → 提示"harness 已装，是否重跑维护 / 升级 bundle 脚本？"；若升级 bundle 脚本，AGENTS.md 按幂等表"条件覆盖"处理：① 读旧 AGENTS.md 的「项目记忆」内联段已填内容并备份；② 识别已安装的可选 worktree 协作段及其用户调整；③ 用新模板覆盖 AGENTS.md；④ 把备份内联段填回新模板对应位置，并合并或保留已安装的协作约定（勿重置为占位符或静默移除用户调整）；⑤ 若新模板内联段结构跨版本变更（增删字段/改名），须显式给出迁移映射，不能机械填回
 - 无 `bootstrap_status` 字段（首次）→ 从 Phase 0 开始
 - 已存在 `kb-bootstrap-decisions.md` 决策记录（Phase 0 中断过）→ 复述历史决策，给用户选项：沿用 / 重新决策
 

@@ -36,7 +36,7 @@ class AgentDocsLayoutTests(unittest.TestCase):
     def write(self, relative, text):
         p = self.root / relative
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding='utf-8')
+        p.write_bytes(text.encode('utf-8'))
 
     def tearDown(self):
         self.tmp.cleanup()

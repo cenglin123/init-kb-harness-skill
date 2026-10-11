@@ -10,8 +10,10 @@
 | scripts/audit.py | .meta/scripts/audit.py | 文档一致性只读审计 |
 | scripts/check_all.py | .meta/scripts/check_all.py | 完工机械检查 |
 | scripts/maintain.py（文档版） | .meta/scripts/docs_maintain.py | 审计、30 天提醒、上下文；索引委托 memory_index |
-| scripts/worktree_task.py（若安装） | .meta/scripts/worktree_task.py | 原 worktree 四动作，改 hook/任务引用 |
+| scripts/worktree_task.py（若安装） | .meta/scripts/worktree_task.py | 任务隔离与协作 helper，更新调用引用；已有 hook 调用随路径迁移 |
 | .agents/memory/** | .meta/memory/** | 持久记忆；KB 索引为唯一派生入口 |
+
+`worktree_task.py` 是可选协作桥接的一部分：从新版 init-agent-docs 的 `assets/scripts/` 迁入或复用同一 helper，不在 KB bundle 再放一份。其登记位置由 helper 解析到 Git common-dir，同一 clone 的 linked worktree 共用该 registry；不同 clone 或设备不会自动共享。没有 Git 或用户未启用时，不安装此 helper，不创建 worktree 或 registry。主从限制与派生数据的主机整合规则见 `refs/agents-template.md`。
 
 `.meta/scripts/maintain.py` 永远是 KB 全管线入口。通用项目仍保持 init-agent-docs 原布局；这些脚本必须来自支持 `.meta/scripts/` 的新版 agent-docs 源，不能把旧脚本只搬目录：旧 ROOT=parents[1] 会把 `.meta` 当项目根。
 

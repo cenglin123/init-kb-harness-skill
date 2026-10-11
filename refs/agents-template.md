@@ -87,6 +87,18 @@ Vault/
 
 ## Agent 接到任务时的工作流
 
+<!-- optional-worktree-bridge:start -->
+### 可选 worktree 协作约定
+
+仅当本库位于 Git 仓库且用户选择启用时，复用 init-agent-docs 提供的 `.meta/scripts/worktree_task.py` 与 Git common-dir registry。若未启用或没有 Git，不安装此 helper；只读检索/评审任务不创建 task worktree 或登记任务。创建时显示名只输入一次；ID、分支和目录由 helper 稳定派生，续接按 ID、owner、generation 定位。动作和参数以 helper 的 `--help` 为准。
+
+对跨上下文或并行任务，开始写入前主动入场：先 `list` 查看未关闭任务及范围；用 `create --name ... --owner ...` 创建并领取，或用 `resume <id> --owner ... --generation ...` 恢复；用 `intent` 登记目标、非目标、路径范围和已提交 SHA 依赖。`review <id>` 检查重叠与依赖；受影响任务需双方记录一致的 `coordinate` 结论，再把 review 返回的摘要传给 `admit <id> --review-digest ...`。每次开始或恢复文件写入前运行 `check <id> --owner ... --generation ... --write`；范围变化时更新 intent 并重新 review/coordinate/admit。完整参数见 helper `--help`。这些是 agent 主动执行的流程，不会自动联系其他任务或代替用户授权。
+
+此约定是跨工具的 agent 工作流程，不是系统安全边界。agent 可在 task/owner/generation 不一致时停止并要求重新核对；这不能拦截直接文件编辑、手工 Git、旧版 CLI、其他 clone 或任意 GUI 操作。owner 字段只是声明，不是身份认证；内容摘要也不证明语义正确。registry 仅在同一 Git common-dir 的 linked worktree 间共享，不自动同步到另一 clone 或设备。此流程不要求 forced hook、固定分类、宿主专属分支前缀或自动通知。
+
+`.env:PRIMARY_HOST` 主从权限优先于 task owner。从机可以只读 list/check/review；不得创建 task worktree、写 registry 或执行 Git 写命令。worktree 不隔离共享数据库、派生维护或部署；需要共享派生状态时，由主机在主工作树整合后统筹写入。
+<!-- optional-worktree-bridge:end -->
+
 ### 第 0 步 · 环境自检
 - **主从自检**：写入前确认本机 hostname == `.env:PRIMARY_HOST`。不一致（从机）→ 进入受限写入模式（可新建/修改用户领地 .md 原文 + active plan；禁止改持久型文件、禁止跑维护脚本、禁止 git 写类命令）
 - **模型自检**：`python .meta/scripts/whoami.py` 确认实际 provider / model
