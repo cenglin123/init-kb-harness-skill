@@ -20,6 +20,7 @@ import sys
 import argparse
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import VAULT_ROOT, scan_memory_notes, rel_path, log_script_run
@@ -120,6 +121,16 @@ def build_index_section() -> str:
         lines.append('### 其他')
         lines.extend(sorted(others))
         lines.append('')
+    # Preserve agent-docs bugfix discoverability in the same derived index.
+    bugfix_dir = VAULT_ROOT / 'docs' / 'problems' / 'bugfix'
+    bugfixes = sorted(p for p in bugfix_dir.glob('*.md') if not p.name.startswith('_'))
+    if bugfixes:
+        lines.append('### bugfix（docs/problems/bugfix/）')
+        for md in bugfixes:
+            target = '../../docs/problems/bugfix/' + quote(md.name)
+            label = md.name.replace('[', '&#91;').replace(']', '&#93;')
+            lines.append(f'- [{label}]({target}) — {extract_title(md)}')
+        lines.append('')
     return '\n'.join(lines).rstrip()
 
 
@@ -145,8 +156,8 @@ def main():
         log_script_run()  # --check 是 pre-commit 只读检查，不写 usage-log 避免污染工作区
 
     if not MEMORY_MD.exists():
-        print(f"  [skip] {rel_path(MEMORY_MD)} 不存在（memory 骨架未安装）")
-        return 0
+        print(f"  [error] {rel_path(MEMORY_MD)} 不存在（memory 骨架缺失）")
+        return 1
 
     old_text = MEMORY_MD.read_text(encoding='utf-8')
     section = build_index_section()

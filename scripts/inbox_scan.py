@@ -22,7 +22,7 @@ CACHE_PATH = VAULT_ROOT / '.meta' / 'inbox-suggestions.json'
 TAXONOMY_PATH = VAULT_ROOT / 'docs' / 'TAXONOMY.md'
 
 TOP_EXCLUDES = {
-    'AGENTS.md', 'CLAUDE.md', 'GEMINI.md',
+    'AGENTS.md',
     'README.md', '.env', '.env.example', '.gitignore',
 }
 

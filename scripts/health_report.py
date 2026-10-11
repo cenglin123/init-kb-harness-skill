@@ -35,7 +35,7 @@ SPARSE_CATEGORY_MIN = int(_os.environ.get('SPARSE_CATEGORY_MIN', '3'))
 ARCHIVE_MARKERS = tuple(m.strip() for m in _os.environ.get('ARCHIVE_MARKERS', '归档').split(',') if m.strip())
 
 TOP_EXCLUDES = {
-    'AGENTS.md', 'CLAUDE.md', 'GEMINI.md',
+    'AGENTS.md',
     'README.md', '.env', '.env.example', '.gitignore',
 }
 

@@ -33,7 +33,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 2. 拷贝**全量脚本集**到 `.meta/scripts/`（含 maintain.py 完整管线 + extract_office + dream/semantic_lint/synthesize/knowledge_map/bm25_index）
 3. `pip install -r requirements.txt`（含 office 提取依赖）
 4. `.env.example` → `.env`（`HARNESS_MODE=lite`（默认）或 `full`；完整版另填 API key；另有 `PRIMARY_HOST` + `MAINTAIN_CONCURRENCY` + office/阈值参数）
-5. `docs/CONSTITUTION.md` + `docs/TAXONOMY.md` + `AGENTS.md`（`bootstrap_status: in_progress`）→ 跑 `sync_agents.py`
+5. `docs/CONSTITUTION.md` + `docs/TAXONOMY.md` + `AGENTS.md`（`bootstrap_status: in_progress`；唯一入口，无同步副本）
 6. 安装 `.githooks/pre-commit`（统一版）并接线：`git config core.hooksPath .githooks`
 7. Phase 2：拷贝 memory-scaffold 到 `.meta/memory/`
 8. Phase 3：建 `.meta/converge/` charter + `.meta/governed-files.txt` + `.env:CONVERGE_DIR`

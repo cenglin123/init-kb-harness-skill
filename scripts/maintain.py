@@ -298,15 +298,23 @@ def _update_workflow_frequency():
 
 
 def _insert_changelog_entry_safe(changelog_path, start, full, bullets, skip_changelog):
-    """安全插入 CHANGELOG 条目；changelog_append.py 不存在则跳过。"""
+    """优先复用 agent-docs changelog.py，否则使用 KB 独立追加器。"""
     if skip_changelog or not bullets:
         return False
+    title = f"维护（{'全量' if full else '增量'}）"
+    if (SCRIPTS_DIR / 'changelog.py').is_file():
+        result = run_script('changelog.py', extra_args=[
+            'add', '--date', start.strftime('%Y-%m-%d'), '--title', title,
+            '--body', '\n'.join('- ' + bullet for bullet in bullets),
+        ])
+        if result.returncode != 0:
+            log_subprocess_result('changelog', result)
+        return result.returncode == 0
     try:
         sys.path.insert(0, str(SCRIPTS_DIR))
         from changelog_append import insert_changelog_entry
     except ImportError:
         return False
-    title = f"维护（{'全量' if full else '增量'}）"
     return insert_changelog_entry(
         changelog_path,
         start.strftime('%Y-%m-%d %H:%M'),
@@ -477,7 +485,18 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     memidx_result = run_script('memory_index.py')
     outputs['memory_index'] = log_subprocess_result('memory_index', memidx_result)
     if memidx_result.returncode != 0:
-        print("  ⚠️  memory_index 失败（非致命）")
+        print("  ✗ memory_index 失败，请修复记忆入口后重跑维护")
+        return 1
+
+    # 文档审计由 init-agent-docs 的重定位 helper 承接；只读调用，索引仍由 KB 写。
+    docs_helper = SCRIPTS_DIR / 'docs_maintain.py'
+    if docs_helper.is_file():
+        print("\n[+] 文档审计与定期审计提醒 ...")
+        docs_result = run_script('docs_maintain.py', extra_args=['--check'])
+        outputs['docs_audit'] = log_subprocess_result('docs_audit', docs_result)
+        if docs_result.returncode != 0:
+            print("  ✗ 文档审计失败，请修复后重跑维护")
+            return 1
 
     # 附加 · Dream 报告（记忆活性扫描 + 衰减预警，非关键路径）
     print("\n[+] 生成 Dream 报告 ...")
