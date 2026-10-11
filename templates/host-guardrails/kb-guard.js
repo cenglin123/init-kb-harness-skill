@@ -47,6 +47,8 @@ function runGuard(directory, subcommand, stdinData, extraArgs = []) {
         cwd: directory,
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+        // 宿主服务进程无 console：不隐藏则 python 新建 console，被默认终端接管为可见窗口并抢焦点
+        windowsHide: true,
       });
     } catch {
       console.warn(`[kb-guard] spawn 失败（无 python?），放行`);
