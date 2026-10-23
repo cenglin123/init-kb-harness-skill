@@ -11,7 +11,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 ## 安装模式：简化版（默认）/ 完整版（可选升级）
 
-**默认安装简化版（lite）**：零 API key、零嵌入数据库。原 DeepSeek LLM 承担的角色（总结、主题合成、语义精排）由运维知识库的 agent 自己兼任——检索走 **agentic grep/glob + 文件夹分类导航**，辅以本地 BM25 索引（`bm25_index.py`，自实现算法、直接扫描语料、不依赖嵌入库与 API）、图谱/反链（`build_graph.py` / `ask.py --backlinks/--neighbors`）与 office 提取件。**默认不做 LLM 总结（summarize.py）和嵌入数据库（embed.py / embeddings.sqlite）。**
+**默认安装简化版（lite）**：零 API key、零嵌入数据库。原 DeepSeek LLM 承担的角色（总结、主题合成、语义精排）由运维知识库的 agent 自己兼任——检索走 **agentic grep/glob + 文件夹分类导航**，辅以本地 BM25 索引（`bm25_index.py`，自实现倒排算法、增量构建 + 并行分词 + pickle 序列化、不依赖嵌入库与 API）、图谱/反链（`build_graph.py` / `ask.py --backlinks/--neighbors`）与 office 提取件。**默认不做 LLM 总结（summarize.py）和嵌入数据库（embed.py / embeddings.sqlite）。**
 
 **完整版（full）** 为可选升级：在上述基础上加 embeddings.sqlite（Zhipu embedding）+ DeepSeek 批处理（summarize / synthesize / semantic_lint P2 / ask.py --rerank/--deep）。两种模式共用同一套脚本集（一次拷齐），模式只影响 `maintain.py` 是否跑 LLM 步骤与 `ask.py` 的可用档位。完整版另内置**大文件闸门**（硬约束，写在脚本里）：超过 `LARGE_FILE_THRESHOLD_MB`（默认 1MB）的单文件不直接进嵌入/LLM 管线，挂起登记 `.meta/large-files-pending.md`，维护完成后 agent 必须向用户询问处理方式（全套 / 仅排除嵌入与LLM / 跳过 / 切分 / 删除），决定记录 `.meta/rules/large-file-policy.md`：
 
@@ -209,7 +209,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `summarize.py` | 每篇生成摘要/tag/关联 sidecar；**跨文件并发 API**（**完整版**；lite 由 maintain.py 跳过）；大文件闸门同 embed | DeepSeek + embeddings | `--full` |
 | `build_index.py` | `.index/manifest.md` + 分类清单 + topics.md（office 文档以 📎 标记纳入） | 本地 | 无参 |
 | `build_graph.py` | 全局图谱 graph.json（wikilink + semantic 边）+ 断链报告 | 本地（semantic 边来自 summarize 产物，lite 下自动只有 wiki/md 边） | 无参 |
-| `bm25_index.py` | BM25 稀疏索引（自实现算法、零 API、零嵌入库依赖，**直接扫描语料**，lite/full 均可用）→ `.meta/bm25_index.json.gz` | 本地 | `--build` / `--query "xxx" --top-k N` |
+| `bm25_index.py` | BM25 稀疏倒排索引（自实现算法、零 API、零嵌入库依赖；**增量构建**——词频缓存只重算变化文件，并行分词，lite/full 均可用）→ `.meta/bm25_index.pkl.gz`（+ 文档词频缓存 `bm25_doc_cache.pkl.gz`；`--rebuild` 忽略缓存全量重建） | 本地 | `--build` / `--rebuild` / `--query "xxx" --top-k N` |
 
 ### 派生报告与自沉淀层
 

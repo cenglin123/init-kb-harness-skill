@@ -509,21 +509,22 @@ def check_deep_dedup():
 
 def check_bm25_build():
     """回归测试：验证 BM25 索引文件存在且可解析"""
-    bm25_path = VAULT_ROOT / '.meta' / 'bm25_index.json.gz'
+    bm25_path = VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz'
     if not bm25_path.exists():
-        print("SKIP: bm25_index.json.gz 不存在（需先运行 bm25_index.py --build）")
+        print("SKIP: bm25_index.pkl.gz 不存在（需先运行 bm25_index.py --build）")
         return True
 
     try:
         import gzip
-        index = json.loads(gzip.decompress(bm25_path.read_bytes()))
-        required_keys = ['N', 'avgdl', 'idf', 'docs_paths', 'generated_at']
+        import pickle
+        index = pickle.loads(gzip.decompress(bm25_path.read_bytes()))
+        required_keys = ['index_version', 'N', 'avgdl', 'idf', 'postings', 'docs_paths', 'generated_at']
         for k in required_keys:
             if k not in index:
                 print(f"FAIL: BM25 索引缺少 '{k}' 字段")
                 return False
 
-        if index['N'] > 0 and len(index['docs_paths']) == index['N']:
+        if index['N'] > 0 and len(index['docs_paths']) == index['N'] and len(index['postings']) == len(index['idf']):
             print(f"PASS: BM25 索引有效（{index['N']} 文档, {len(index['idf'])} 词项）")
             return True
         else:
@@ -647,7 +648,7 @@ def main():
     parser.add_argument('--check-deep-dedup', action='store_true',
                         help='去重逻辑回归测试：验证 deep search (path, chunk_index) 去重正确性')
     parser.add_argument('--check-bm25-build', action='store_true',
-                        help='BM25 索引回归测试：验证 bm25_index.json.gz 存在且字段完整')
+                        help='BM25 索引回归测试：验证 bm25_index.pkl.gz 存在且字段完整')
     parser.add_argument('--check-rerank-fallback', action='store_true',
                         help='Rerank 降级路径回归测试：验证空候选处理与 API 降级路径')
     args = parser.parse_args()

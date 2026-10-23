@@ -1048,7 +1048,7 @@ def main():
         retrieval_method = 'hybrid'
     elif use_bm25:
         retrieval_method = 'bm25'
-        if not (VAULT_ROOT / '.meta' / 'bm25_index.json.gz').exists():
+        if not (VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz').exists():
             print("⚠️  BM25 索引不存在，请先运行 python .meta/scripts/maintain.py"
                   "（或 python .meta/scripts/bm25_index.py --build）。")
             results = []
