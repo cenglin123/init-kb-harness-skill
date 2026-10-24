@@ -260,10 +260,14 @@ def _load_index():
 
 
 def search(query, top_k=10):
-    """BM25 检索，返回 [(path, chunk_index, score), ...]（按分数降序）。"""
+    """BM25 检索，返回 [(path, chunk_index, score), ...]（按分数降序）。
+
+    索引不可用（缺失/损坏/旧版本）时返回 None，与"查到了 0 条"区分开——
+    调用方必须据此降级或报错，不能当作"没有相关内容"。
+    """
     index = _load_index()
     if index is None:
-        return []
+        return None
 
     k1, b = index['k1'], index['b']
     avgdl = index['avgdl']
@@ -309,6 +313,10 @@ def main():
 
     if args.query:
         results = search(args.query, top_k=args.top_k)
+        if results is None:
+            print("错误：BM25 索引不可用（缺失/损坏/旧版本），请先 --build 重建",
+                  file=sys.stderr)
+            sys.exit(2)
         for path, chunk_idx, score in results:
             print(f"[{score:.4f}] {path} (chunk {chunk_idx})")
         if not results:

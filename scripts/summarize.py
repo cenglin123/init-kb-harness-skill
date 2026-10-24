@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_notes, scan_office_extracts, content_hash, rel_path,
     meta_mirror, ensure_parent, DeepSeekClient,
-    MAINTAIN_CONCURRENCY, llm_pipeline_check,
+    MAINTAIN_CONCURRENCY, llm_pipeline_check, llm_enabled,
 )
 
 VOCAB_PATH = VAULT_ROOT / '.meta' / 'tag-vocab.json'
@@ -116,6 +116,9 @@ def already_up_to_date(sidecar: Path, h: str) -> bool:
 
 
 def main(full=False):
+    if not llm_enabled():
+        print("  ✗ LLM 层未启用（HARNESS_MODE=full + DEEPSEEK_API_KEY）", file=sys.stderr)
+        return 1
     try:
         client = DeepSeekClient()
     except RuntimeError as e:

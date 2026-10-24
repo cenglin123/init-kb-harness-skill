@@ -23,7 +23,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, scan_notes, rel_path, ensure_parent, DeepSeekClient, log_script_run
+from common import (VAULT_ROOT, scan_notes, rel_path, ensure_parent, DeepSeekClient,
+                    log_script_run, llm_enabled)
 
 
 def glob_notes(scope_pattern: str) -> list[Path]:
@@ -168,6 +169,9 @@ def write_synthesis(theme: str, content: str, scope: str, model: str):
 
 def main():
     log_script_run()
+    if not llm_enabled():
+        print("  ✗ LLM 层未启用（HARNESS_MODE=full + DEEPSEEK_API_KEY）", file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description='主题合成分析')
     parser.add_argument('--theme', required=True, help='合成主题名称')
     parser.add_argument('--scope', required=True, help='笔记范围（glob 模式，逗号分隔）')

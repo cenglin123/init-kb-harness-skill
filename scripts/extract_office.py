@@ -23,6 +23,7 @@ extract_office.py — office 文档纯文本提取（sidecar 机制）
 
 import sys
 import argparse
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -46,6 +47,8 @@ WORKERS = int(ENV.get('OFFICE_EXTRACT_WORKERS') or MAINTAIN_CONCURRENCY)
 
 LEGACY_REPORT = OFFICE_EXTRACTS_DIR / '_legacy-formats.md'
 TIMEOUT_REPORT = OFFICE_EXTRACTS_DIR / '_timeouts.md'
+FAILURE_REPORT = OFFICE_EXTRACTS_DIR / '_failures.md'
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 # ─── 各格式提取器（缺依赖时该格式整体跳过并提示）──────────────────────────
@@ -178,7 +181,10 @@ def write_sidecar(src_rel: str, h: str, extractor: str, text: str, sc: Path):
     if truncated:
         body += f'\n\n（… 已截断，仅保留前 {MAX_CHARS} 字符）'
     ensure_parent(sc)
-    sc.write_text(fm + body + '\n', encoding='utf-8', newline='')
+    # 原子写：先写临时文件再替换，避免超时/崩溃留下"hash 已对、正文截断"的 sidecar
+    tmp = sc.with_name(sc.name + '.tmp')
+    tmp.write_text(fm + body + '\n', encoding='utf-8', newline='')
+    os.replace(tmp, sc)
 
 
 def _extract_one(src: Path, rel: str, h: str) -> tuple:
@@ -196,7 +202,8 @@ def _run_worker(rel: str, h: str):
     try:
         r = subprocess.run(cmd, cwd=str(VAULT_ROOT), capture_output=True,
                            text=True, encoding='utf-8', errors='replace',
-                           timeout=(EXTRACT_TIMEOUT_S or None))
+                           timeout=(EXTRACT_TIMEOUT_S or None),
+                           creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired:
         return rel, 'timeout', f'超过 {EXTRACT_TIMEOUT_S}s'
     if r.returncode == 0:
@@ -208,8 +215,13 @@ def _run_worker(rel: str, h: str):
 # ─── 孤儿清理 / 报告 ──────────────────────────────────────────────────────
 
 def cleanup_orphans(valid_sidecars: set) -> int:
-    """删除源文件已不存在的 sidecar。"""
+    """删除源文件已不存在的 sidecar，以及中断残留的 .tmp。"""
     removed = 0
+    for tmp in OFFICE_EXTRACTS_DIR.rglob('*.tmp'):
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
     for sc in list(scan_office_extracts()):
         if sc not in valid_sidecars:
             try:
@@ -256,6 +268,22 @@ def report_timeouts(rows: list):
     TIMEOUT_REPORT.write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='')
 
 
+def report_failures(rows: list):
+    if not rows:
+        if FAILURE_REPORT.exists():
+            FAILURE_REPORT.unlink()
+        return
+    lines = [
+        '# office 提取失败（本轮跳过）',
+        '',
+        '> 这些文件本轮没有产出/更新 sidecar；修好后下次维护自动重试。',
+        '',
+    ]
+    lines += [f'- `{rel}` — {msg}' for rel, msg in rows]
+    ensure_parent(FAILURE_REPORT)
+    FAILURE_REPORT.write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='')
+
+
 # ─── 主流程 ────────────────────────────────────────────────────────────────
 
 def main(full=False):
@@ -291,6 +319,7 @@ def main(full=False):
     ok = skipped = failed = 0
     skipped = len(docs) - len(todo)
     timed_out = []
+    failures = []
     if todo:
         with ThreadPoolExecutor(max_workers=max(1, WORKERS)) as pool:
             futures = {pool.submit(_run_worker, rel, h): rel for _, rel, h in todo}
@@ -305,6 +334,7 @@ def main(full=False):
                     failed += 1
                 else:
                     failed += 1
+                    failures.append((rel, msg))
                     print(f"  ✗ {rel}: {msg}")
 
     # 孤儿判定基于全部扫描到的源文件（含因缺依赖本轮跳过的格式）——
@@ -313,6 +343,7 @@ def main(full=False):
     removed = cleanup_orphans(valid)
     legacy = report_legacy()
     report_timeouts(timed_out)
+    report_failures(failures)
 
     print(f"  ✓ office 提取完成：{ok} 提取 / {skipped} 未变跳过 / {failed} 失败"
           f"（其中 {len(timed_out)} 超时） / {removed} 孤儿清理")
@@ -321,6 +352,8 @@ def main(full=False):
     if timed_out:
         print(f"  ⚠️  {len(timed_out)} 个文件超时跳过（见 .meta/office-extracts/_timeouts.md）；"
               f"可调 OFFICE_EXTRACT_TIMEOUT_S 或拆分文件")
+    if failures:
+        print(f"  ⚠️  {len(failures)} 个文件提取失败（见 .meta/office-extracts/_failures.md）")
     return 0
 
 

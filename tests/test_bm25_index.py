@@ -170,7 +170,8 @@ class BM25IndexTests(unittest.TestCase):
         with gzip.open(self.vault / '.meta' / 'bm25_index.pkl.gz', 'wb') as f:
             pickle.dump({'k1': 1.5, 'b': 0.75, 'N': 1, 'avgdl': 1.0}, f)
         result = self.run_bm25('--query', '知识库维护')
-        self.assertEqual(result.returncode, 0)
+        # 旧格式 = 索引不可用，必须以非 0 退出，不能当作"没有结果"
+        self.assertEqual(result.returncode, 2)
         self.assertIn('重建', result.stderr)
 
 

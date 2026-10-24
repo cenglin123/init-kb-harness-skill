@@ -13,8 +13,7 @@
 **默认零 API**：语义层用内置本地模型 `bge-small-zh-v1.5`（fastembed + onnxruntime，512 维、450 字分块、离线），不需要任何 key。检索 = 向量 + BM25 + 图谱 + agentic grep/glob。
 
 - **换更高质量的嵌入**：填 `EMBED_BASE_URL` + `EMBED_MODEL`，任意 OpenAI 兼容 `/embeddings` 端点都行（本地 `ollama pull qwen3-embedding:4b` 后指到 `http://127.0.0.1:11434/v1`；或智谱/OpenAI 云端）。换来源后跑一次 `embed.py --full` 重建向量库——内置模型保证升级前始终有可用嵌入。
-- **LLM 层（可选）**：`HARNESS_MODE=full` + `DEEPSEEK_API_KEY`，只影响摘要/tag/综述/精排，不影响检索正确性。
-- **LLM 层**（摘要 / tag / synthesize / semantic_lint P2 / `--rerank` / `--deep`）：`HARNESS_MODE=full` + `DEEPSEEK_API_KEY`。它**不影响检索正确性**——摘要不参与排序，只影响结果可读性与综述素材。
+- **LLM 层（可选）**：`HARNESS_MODE=full` + `DEEPSEEK_API_KEY` → 摘要 / tag / synthesize / semantic_lint P2 / `--rerank` / `--deep`。它**不影响检索正确性**——摘要不参与排序，只影响结果可读性与综述素材。
 - **DeepSeek 模型选型**：一律用最新版的**次等**模型（当前 `deepseek-v4-flash`；完整策略见 SKILL.md §约束）。
 - key 自备，走目标仓库的 `.env`（见 `templates/env.example`）。旧仓库只填了 `ZHIPU_*` 会被自动识别为语义层端点，无需迁移。
 
@@ -26,14 +25,14 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ### 前置：Phase 0（由技能触发，read-only 体检 + 交互式引导）
 
-在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + 仓库画像，含 office 文档统计），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 安装模式与可选增强层（默认零 API；语义层看是否已有 embeddings 端点；LLM 层可选）/ 可选 worktree 协作桥接（仅 Git 仓库）逐个给出选项，选择结果记录进 `kb-bootstrap-decisions.md`（执行记录）。全部适用决策完成即进 Phase 1。
+在目标 Obsidian 仓库触发本技能后，agent 先跑 Phase 0 体检（隐私嗅探 + taxonomy 推断 + 仓库画像，含 office 文档统计），随后**一步一步引导用户决策**：隐私目录 / taxonomy / 嵌入来源（默认内置本地模型；是否换成本机 Ollama/云端端点）/ 是否启用 LLM 层 / 可选 worktree 协作桥接（仅 Git 仓库）逐个给出选项，选择结果记录进 `kb-bootstrap-decisions.md`（执行记录）。全部适用决策完成即进 Phase 1。
 
 ### Phase 1→2→3（机械安装，一次完成）
 
 1. 检测/调用 `init-agent-docs` 打底（已装则复用不重铺）
 2. 拷贝**全量脚本集**到 `.meta/scripts/`（含 maintain.py 完整管线 + extract_office + dream/semantic_lint/synthesize/knowledge_map/bm25_index/build_links）
-3. `pip install -r requirements.txt`（含 office 提取依赖）
-4. `.env.example` → `.env`（`HARNESS_MODE=lite` 默认；要语义层填 `EMBED_BASE_URL` + `EMBED_MODEL`；要 LLM 层设 `full` 并填 key；另有 `PRIMARY_HOST` + `MAINTAIN_CONCURRENCY` + office/阈值参数）
+3. 安装 Python 依赖：**优先用离线套装**（`assets\scripts\15-install-kb-deps.ps1`，含 wheel + 内置模型缓存）；无套装时 `pip install -r requirements.txt`（含 fastembed 与 office 提取依赖）
+4. `templates/env.example` → `.env`（默认 `HARNESS_MODE=lite` + `EMBED_PROVIDER=auto` 走内置模型，无需再配；换端点才填 `EMBED_BASE_URL` + `EMBED_MODEL`；要 LLM 层设 `full` 并填 key；另有 `PRIMARY_HOST` + `MAINTAIN_CONCURRENCY` + office 并发/超时 + 阈值）
 5. `docs/CONSTITUTION.md` + `docs/TAXONOMY.md` + `AGENTS.md`（`bootstrap_status: in_progress`；唯一入口，无同步副本）
 6. 目标仓库有 Git 时安装 `.githooks/pre-commit`（统一版）并接线：`git config core.hooksPath .githooks`；没有 Git 时跳过 hook 与可选协作 helper
 7. Phase 2：拷贝 memory-scaffold 到 `.meta/memory/`

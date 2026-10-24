@@ -384,13 +384,19 @@ class SemanticLayerTests(unittest.TestCase):
         self.assertIn('HARNESS_MODE=lite', result.stdout)
         self.assertNotIn('摘要 / tag', result.stdout)
 
-    def test_maintain_survives_embed_failure(self):
+    def test_maintain_survives_embed_failure_but_exits_3(self):
+        mem = self.vault / '.meta' / 'memory'
+        mem.mkdir(parents=True, exist_ok=True)
+        (mem / 'MEMORY.md').write_text(
+            '# 记忆索引\n\n<!-- memory-index:start -->\n<!-- memory-index:end -->\n',
+            encoding='utf-8')
         (self.vault / '.env').write_text(
             'HARNESS_MODE=lite\nPRIMARY_HOST=\nEMBED_PROVIDER=http\n'
             'EMBED_BASE_URL=http://127.0.0.1:9/v1\nEMBED_MODEL=x\n', encoding='utf-8')
         result = self.run_script('maintain.py', '--no-git')
         self.assertIn('语义层本轮失败', result.stdout)
         self.assertTrue((self.vault / '.meta' / 'bm25_index.pkl.gz').exists())
+        self.assertEqual(result.returncode, 3)
 
     def test_links_rebuild_on_model_or_threshold_change(self):
         self.assertEqual(self.run_script('embed.py').returncode, 0)
@@ -406,6 +412,81 @@ class SemanticLayerTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertIn('篇更新', second.stdout)
         self.assertNotIn('无需更新', second.stdout)
+
+    def test_corrupt_bm25_index_is_not_reported_as_no_hits(self):
+        self.assertEqual(self.run_script('bm25_index.py', '--build').returncode, 0)
+        (self.vault / '.meta' / 'bm25_index.pkl.gz').write_bytes(b'corrupted')
+        plain = self.run_script('ask.py', '索引重建')
+        self.assertEqual(plain.returncode, 2)
+        self.assertNotIn('未找到相关笔记', plain.stdout)
+        check = self.run_script('ask.py', '--check', '索引重建')
+        self.assertEqual(check.returncode, 2)
+        self.assertIn('查重不可用', check.stderr)
+
+    def test_unreadable_note_does_not_block_full_rebuild(self):
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        # GBK 编码笔记：不可读，但不应阻塞换代
+        (self.notes / 'gbk.md').write_bytes(
+            '# GBK\n\n## x\n中文国标编码'.encode('gbk'))
+        self.server.dim = 4
+        result = self.run_script('embed.py', '--full')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.meta()[1], 4)
+        self.assertIn('已跳过', result.stdout)
+        self.assertTrue((self.vault / '.meta' / 'embed-skipped.md').exists())
+
+    def test_same_stem_notes_keep_distinct_semantic_edges(self):
+        (self.notes / 'a').mkdir()
+        (self.notes / 'b').mkdir()
+        (self.notes / 'a' / 'topic.md').write_text('# 甲主题\n\n## x\n甲内容', encoding='utf-8')
+        (self.notes / 'b' / 'topic.md').write_text('# 乙主题\n\n## x\n乙内容', encoding='utf-8')
+        (self.notes / 'index.md').write_text('# 索引\n\n## x\n入口', encoding='utf-8')
+        env = (self.vault / '.env').read_text(encoding='utf-8')
+        (self.vault / '.env').write_text(
+            env + 'LINKS_SIM_THRESHOLD=0\nSEMANTIC_THRESHOLD=0\n', encoding='utf-8')
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        self.assertEqual(self.run_script('build_links.py').returncode, 0)
+        side = (self.vault / '.meta' / 'links' / 'notes' / 'index.md').read_text(encoding='utf-8')
+        self.assertIn('[[notes/a/topic|topic]]', side)
+        self.assertIn('[[notes/b/topic|topic]]', side)
+        self.assertEqual(self.run_script('build_graph.py').returncode, 0)
+        g = json.loads((self.vault / '.meta' / 'graph.json').read_text(encoding='utf-8'))
+        targets = {e['target'] for e in g['edges'] if e.get('source') == 'notes/index.md'}
+        self.assertIn('notes/a/topic.md', targets)
+        self.assertIn('notes/b/topic.md', targets)
+
+    def test_builtin_ignores_zhipu_http_model(self):
+        (self.vault / '.env').write_text(
+            'EMBED_PROVIDER=builtin\nZHIPU_API_KEY=test\n'
+            'ZHIPU_EMBED_MODEL=embedding-3\n', encoding='utf-8')
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "from common import embed_settings as s;"
+                "c = s(); print(c['provider'], c['model'])" % self.scripts)
+        result = self.subprocess_py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('builtin BAAI/bge-small-zh-v1.5', result.stdout)
+
+    def test_invalid_mode_is_treated_as_lite(self):
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        (self.vault / '.env').write_text(
+            'HARNESS_MODE=ful\nDEEPSEEK_API_KEY=test\nPRIMARY_HOST=\n'
+            f'EMBED_PROVIDER=http\nEMBED_BASE_URL={self.server.base_url}\n'
+            'EMBED_MODEL=fake-embed\n', encoding='utf-8')
+        result = self.run_script('maintain.py', '--no-git')
+        self.assertIn('HARNESS_MODE=lite', result.stdout)
+        self.assertNotIn('摘要 / tag', result.stdout)
+
+    def test_office_failure_is_reported_without_half_sidecar(self):
+        (self.notes / 'broken.docx').write_bytes(b'not a docx')
+        (self.vault / '.env').write_text(
+            'PRIMARY_HOST=\nOFFICE_EXTRACT_TIMEOUT_S=30\nOFFICE_EXTRACT_WORKERS=1\n',
+            encoding='utf-8')
+        result = self.run_script('extract_office.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        failures = self.vault / '.meta' / 'office-extracts' / '_failures.md'
+        self.assertTrue(failures.exists())
+        self.assertIn('broken.docx', failures.read_text(encoding='utf-8'))
+        self.assertEqual(list((self.vault / '.meta' / 'office-extracts').rglob('*.tmp')), [])
 
     def test_office_timeout_skips_file(self):
         (self.vault / 'notes' / 'big.docx').write_bytes(b'PK-not-a-real-docx')

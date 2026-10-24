@@ -99,12 +99,12 @@ def write_links(rel, h, related, wikilinks, model):
     if high:
         lines.append(f"## 高度相关（sim ≥ {HIGH_TIER:.2f}）")
         for r, s in high:
-            lines.append(f"- [[{Path(r).stem}]] — sim {s:.2f}")
+            lines.append(f"- [[{Path(r).with_suffix('').as_posix()}|{Path(r).stem}]] — sim {s:.2f}")
         lines.append("")
     if mid:
         lines.append(f"## 中度相关（{RELATED_THRESHOLD:.2f}–{HIGH_TIER:.2f}）")
         for r, s in mid:
-            lines.append(f"- [[{Path(r).stem}]] — sim {s:.2f}")
+            lines.append(f"- [[{Path(r).with_suffix('').as_posix()}|{Path(r).stem}]] — sim {s:.2f}")
         lines.append("")
     if not high and not mid:
         lines.append("## 相关笔记")

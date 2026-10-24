@@ -16,11 +16,11 @@ maintain.py — init-kb-harness 维护主入口（完整管线）
         图谱/反链 + agent 自身 agentic grep/glob。
     full——额外跑 summarize，提供摘要/tag/合成/rerank/deep。
 
-可选能力（默认全关，装完即零 API、零额外依赖）：
-    语义层  .env 配置 EMBED_BASE_URL + EMBED_MODEL 即启用（任意 OpenAI 兼容
-            /embeddings 端点：本地 Ollama / vLLM / LM Studio，或云端）。
-            与 HARNESS_MODE 无关，lite 下也可单独启用。
-    LLM 层  HARNESS_MODE=full + DEEPSEEK_API_KEY：摘要 / tag / 语义精排。
+分层：
+    语义层  基础能力，默认启用：内置 fastembed 模型（bge-small-zh），
+            或 .env 指任意 OpenAI 兼容 /embeddings。与 HARNESS_MODE 无关。
+    LLM 层  可选：HARNESS_MODE=full + DEEPSEEK_API_KEY → 摘要 / tag / 精排。
+    语义层未就绪时 maintain 以退出码 3 结束（基础能力缺失，bootstrap 不可判定完成）。
 
 用法:
     python .meta/scripts/maintain.py                  # 增量
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run,
     refresh_large_file_report, embedding_enabled, embed_settings,
-    embed_unavailable_hint, llm_enabled,
+    embed_unavailable_hint, llm_enabled, resolve_mode,
 )
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -75,15 +75,15 @@ def _legacy_mode() -> str:
 _mode_env = ENV.get('HARNESS_MODE', '').strip().lower()
 if _mode_env in ('lite', 'full'):
     HARNESS_MODE = _mode_env
+elif _mode_env:
+    # 非法值：与 resolve_mode 一致按 lite，避免"显示 lite 却跑 LLM"
+    HARNESS_MODE = resolve_mode()
 else:
-    if _mode_env:
-        print(f"⚠️  无法识别的 HARNESS_MODE='{ENV.get('HARNESS_MODE')}'（应为 lite|full），"
-              f"按 legacy 规则推断模式", file=sys.stderr)
     HARNESS_MODE = _legacy_mode()
 
-# 语义层是基础能力（看 embed_settings），LLM 层是可选增强（key + 未被 lite 关掉）
+# 语义层是基础能力（看 embed_settings），LLM 层是可选增强（key + full）
 SEMANTIC_ENABLED = embedding_enabled()
-SUMMARIZE_ENABLED = llm_enabled()
+SUMMARIZE_ENABLED = llm_enabled(HARNESS_MODE)
 
 # Windows 下隐藏子进程窗口
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -173,13 +173,15 @@ def summarize_command_output(output: str) -> list:
     return deduped
 
 
-def build_changelog_bullets(full, outputs):
+def build_changelog_bullets(full, outputs, degraded=()):
     bullets = []
     for key in ('rename', 'office', 'embed', 'links', 'summarize', 'index', 'knowledge_map', 'health'):
         bullets.extend(summarize_command_output(outputs.get(key, '')))
 
     if full:
         bullets.insert(0, '执行全量维护，重算全部派生索引与元数据')
+    if any('语义层' in d for d in degraded):
+        bullets.insert(0, '⚠️ 语义层未更新（基础能力缺失，详见维护输出）')
 
     deduped = []
     seen = set()
@@ -423,6 +425,7 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
 
     # 4/6 · 语义层（基础，必需）+ 摘要（可选，需 LLM 层）
     degraded = []
+    semantic_failed = not SEMANTIC_ENABLED
     if SEMANTIC_ENABLED or SUMMARIZE_ENABLED:
         label = []
         if SEMANTIC_ENABLED:
@@ -457,6 +460,7 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
                 # 语义层是基础能力，但失败不应拖垮 BM25/图谱/健康报告
                 print("  ⚠️  语义层本轮失败（旧向量仍可用）；继续重建其余索引")
                 degraded.append('语义层')
+                semantic_failed = True
 
         if summarize_result is not None and summarize_result.returncode != 0:
             print("  ⚠️  summarize 失败（摘要/tag 本轮未更新）；继续重建其余索引")
@@ -576,7 +580,7 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
         print("\n提交 Agent 产物 ...")
         st = git('status', '--porcelain', check=False)
         if st.stdout.strip():
-            bullets = build_changelog_bullets(full, outputs)
+            bullets = build_changelog_bullets(full, outputs, degraded)
             appended = _insert_changelog_entry_safe(
                 changelog_path, start, full, bullets, skip_changelog
             )
@@ -598,6 +602,9 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
         print(f"\n⚠️  本轮降级完成：{'、'.join(sorted(set(degraded)))} 未成功。"
               f"其余索引已更新；修复后重跑维护即可补齐。")
     print(f"\n=== 维护完成，耗时 {elapsed:.1f}s ===")
+    if semantic_failed:
+        print("⚠️  语义层未就绪：bootstrap 判定为未完成（需先恢复基础嵌入）")
+        return 3
     return 0
 
 

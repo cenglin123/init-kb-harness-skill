@@ -29,7 +29,7 @@ from common import (
     find_all_wikilinks, find_all_mdlinks,
     parse_aliases, pick_closest_by_prefix, log_script_run,
     resolve_wikilink, resolve_mdlink,
-    is_primary_host,
+    is_primary_host, llm_enabled,
 )
 
 CURRENT_YEAR = datetime.now().year
@@ -667,6 +667,10 @@ def main():
         sys.exit(0 if ok else 1)
 
     mode = 'deep' if args.deep else 'quick'
+    if args.deep and not llm_enabled():
+        print("错误：--deep（P2 矛盾检测）需要 LLM 层（HARNESS_MODE=full + DEEPSEEK_API_KEY）",
+              file=sys.stderr)
+        sys.exit(2)
     print(f"=== 语义 Lint 开始 ({mode} 模式) ===")
 
     all_notes = list(scan_notes())

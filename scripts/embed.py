@@ -65,8 +65,10 @@ def _chunk_params() -> tuple:
 
 # 分块粒度可配（BM25 用自己固定的粒度，不受这里影响）
 CHUNK_CHARS, CHUNK_OVERLAP = _chunk_params()
-# builtin 扁平批量的文件批大小（控内存峰值）
+# builtin 扁平批量的文件批大小 / 单批 chunk 上限（控内存峰值）
 FILE_BATCH = _env_int('EMBED_FILE_BATCH', 64)
+CHUNK_BATCH = _env_int('EMBED_CHUNK_BATCH', 2048)
+SKIPPED_REPORT = DB_PATH.parent / 'embed-skipped.md'
 
 
 def _sliding_chunks(text: str, chars: int = None, overlap: int = None) -> list:
@@ -156,14 +158,16 @@ def init_db():
 def read_meta(con):
     try:
         row = con.execute(
-            "SELECT model, dim, chunk_chars, chunk_overlap FROM embed_meta WHERE id=1"
+            "SELECT model, dim, chunk_chars, chunk_overlap, provider "
+            "FROM embed_meta WHERE id=1"
         ).fetchone()
     except sqlite3.Error:
         return None
     if not row:
         return None
     return {'model': row[0], 'dim': row[1],
-            'chunk_chars': row[2], 'chunk_overlap': row[3]}
+            'chunk_chars': row[2], 'chunk_overlap': row[3],
+            'provider': row[4] if len(row) > 4 else ''}
 
 
 def write_meta(con, model: str, dim: int, provider: str):
@@ -225,8 +229,7 @@ def _collect_targets(db, table, full):
         try:
             content = md.read_text(encoding='utf-8')
         except Exception as e:
-            print(f"  [skip] 无法读取: {rel} ({e})")
-            unreadable.append(rel)
+            unreadable.append((rel, f'{type(e).__name__}: {e}'))
             continue
         h = content_hash(md)
         if not full and processed.get(rel) == h:
@@ -260,20 +263,45 @@ def _embed_threaded(client, targets):
     return out
 
 
+def _write_skipped_report(rows: list):
+    """把本轮无法读取的笔记登记下来（永久性跳过，不阻塞换表）。"""
+    if not rows:
+        if SKIPPED_REPORT.exists():
+            SKIPPED_REPORT.unlink()
+        return
+    lines = [
+        '# 无法读取的笔记（未嵌入）',
+        '',
+        '> 这些文件不是 UTF-8 文本，脚本无法读取；它们不会进入语义层，',
+        '> 但 BM25 / 图谱 / 基础索引照常覆盖。转成 UTF-8 后下次维护自动纳入。',
+        '',
+    ]
+    lines += [f'- `{rel}` — {msg}' for rel, msg in rows]
+    SKIPPED_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    SKIPPED_REPORT.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
 def _embed_batched(client, targets):
-    """builtin：按文件批做扁平批量推理（ONNX 内部多线程，避免线程争核）。"""
+    """builtin：按文件批 + chunk 上限做扁平批量推理（ONNX 内部多线程）。"""
     out = {}
     total = len(targets)
-    for base in range(0, total, FILE_BATCH):
-        batch = targets[base:base + FILE_BATCH]
-        chunked = [(rel, h, chunk_text(content)) for rel, h, content in batch]
-        flat = [(rel, c) for rel, _, chunks in chunked for c in chunks]
+    base = 0
+    while base < total:
+        batch, chunks_in_batch = [], 0
+        while base + len(batch) < total and len(batch) < FILE_BATCH:
+            rel, h, content = targets[base + len(batch)]
+            chunks = chunk_text(content)
+            if batch and chunks_in_batch + len(chunks) > CHUNK_BATCH:
+                break
+            batch.append((rel, h, chunks))
+            chunks_in_batch += len(chunks)
+        base += len(batch)
+        flat = [(rel, c) for rel, _, chunks in batch for c in chunks]
         vecs = client.embed_batch([c for _, c in flat])
         it = iter(vecs)
-        for rel, h, chunks in chunked:
+        for rel, h, chunks in batch:
             out[rel] = (h, chunks, [next(it, None) for _ in chunks])
-        print(f"  [{min(base + len(batch), total)}/{total}] 已嵌入 {len(batch)} 篇"
-              f"（{len(flat)} 块）")
+        print(f"  [{base}/{total}] 已嵌入 {len(batch)} 篇（{len(flat)} 块）")
     return out
 
 
@@ -309,7 +337,8 @@ def main(full=False):
         meta is not None and (
             meta['model'] != client.model or meta['dim'] != dim
             or meta['chunk_chars'] != CHUNK_CHARS
-            or meta['chunk_overlap'] != CHUNK_OVERLAP))
+            or meta['chunk_overlap'] != CHUNK_OVERLAP
+            or (meta['provider'] and meta['provider'] != client.provider)))
     if mismatch and not full:
         old = ('无元数据' if meta is None else
                f"{meta['model']} · {meta['dim']} 维 · {meta['chunk_chars']}/{meta['chunk_overlap']}")
@@ -330,6 +359,10 @@ def main(full=False):
 
     try:
         processed, targets, current_paths, unreadable = _collect_targets(db, table, full)
+        _write_skipped_report(unreadable)
+        if unreadable:
+            print(f"  ⚠️  {len(unreadable)} 篇非 UTF-8/不可读笔记已跳过（见 "
+                  f"{SKIPPED_REPORT.relative_to(VAULT_ROOT)}；不阻塞其余嵌入）")
 
         # 清理已删除文件（增量路径；--full 靠换表天然清理）
         if not full:
@@ -340,7 +373,7 @@ def main(full=False):
                     db.execute(f"DELETE FROM {table} WHERE path=?", (p,))
                 db.commit()
 
-        if not targets and not unreadable:
+        if not targets:
             print("  无需更新的笔记")
             if full:
                 staged = db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
@@ -363,7 +396,7 @@ def main(full=False):
         results = (_embed_batched if client.provider == 'builtin' else _embed_threaded)(client, targets)
 
         inserted_files = 0
-        failed_files = list(unreadable)
+        failed_files = []
         for n, (rel, h, content) in enumerate(targets, 1):
             h_res, chunks, vecs = results.get(rel, (None, None, None))
             if h_res is None:

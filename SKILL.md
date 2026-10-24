@@ -1,6 +1,6 @@
 ---
 name: init-kb-harness
-description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Default install is zero-API and zero-extra-dependency: retrieval via agentic grep/glob + local BM25 + graph/backlinks. Two independent opt-in layers: a semantic layer via any OpenAI-compatible /embeddings endpoint (local Ollama/vLLM or cloud), and an LLM layer for summaries/rerank (DeepSeek). Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Existing harnesses use only the explicit agent-docs layout migration when requested; do not rebootstrap them.
+description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Default install is zero-API and includes local embeddings (fastembed/bge-small-zh) plus BM25, graph, and office extraction; semantic recall is baseline, not optional. The LLM layer (summaries/rerank) is opt-in via DeepSeek. Embedding endpoint may be switched to any OpenAI-compatible /embeddings (local Ollama/vLLM or cloud). Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Existing harnesses use only the explicit agent-docs layout migration when requested; do not rebootstrap them.
 ---
 
 # init-kb-harness · 知识库 Harness 引导器
@@ -188,7 +188,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ### Bootstrap 完成判定
 
-1. `python .meta/scripts/maintain.py --full` 成功（默认：extract_office + index + graph + bm25 + knowledge_map + health + dream；语义层另含 embed → build_links，LLM 层另含 summarize）
+1. `python .meta/scripts/maintain.py --full` **退出码 0**（默认：extract_office + embed + build_links + index + graph + bm25 + knowledge_map + health + dream；LLM 层另含 summarize）。退出码 3 = 语义层缺失/失败，bootstrap 不可判完成
 2. `health-report.md` 与 `.index/manifest.md` 生成；若仓库有 office 文档，`.meta/office-extracts/` 有产出
 3. **人审门（交互式）**：agent 引导用户跑一条真实问题检索——语义层未启用时用 `ask.py "query"`（自动降级 BM25）或 agentic grep/glob，启用时用语义检索（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
 4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`、`bootstrap_phase` 改 `phase3`，填 `bootstrap_completed_at: <date>`
@@ -219,7 +219,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**默认内置本地模型（fastembed），可切任意 OpenAI 兼容 `/embeddings`**；HTTP 走跨文件线程池、内置走扁平批量推理；先探针后写库；配置变更**拒绝增量并提示 `--full`**，`--full` 先写临时表再原子换表；大文件闸门：超阈值且无 allow 决定的文件硬性跳过（llm_skip 决定同时清除历史向量） | HTTP 端点 或 fastembed | `--full` |
 | `summarize.py` | 每篇生成摘要 / tag sidecar；**跨文件并发 API**（LLM 层；`HARNESS_MODE=full` 时由 maintain 调用）；大文件闸门同 embed | DeepSeek | `--full` |
 | `build_index.py` | `.index/manifest.md` + 分类清单 + topics.md（office 文档以 📎 标记纳入） | 本地 | 无参 |
-| `build_links.py` | `.meta/links/` 语义关联 sidecar（纯余弦 + wikilink，**无 LLM**）；属语义层，按 content_hash 增量；graph 的 semantic 边与 `--orphans` 引用统计都读它 | 本地（需 embeddings.sqlite） | `--full` |
+| `build_links.py` | `.meta/links/` 语义关联 sidecar（纯余弦 + wikilink，**无 LLM**）；属语义层，按 content_hash+模型+阈值增量；graph 的 semantic 边读它（`--orphans` 只看用户手写链接） | 本地（需 embeddings.sqlite） | `--full` |
 | `build_graph.py` | 全局图谱 graph.json（wikilink + semantic 边）+ 断链报告 | 本地（semantic 边来自 build_links 产物；语义层关闭时只有 wiki/md 边） | 无参 |
 | `bm25_index.py` | BM25 稀疏倒排索引（自实现算法、零 API、零嵌入库依赖；**增量构建**——词频缓存只重算变化文件，并行分词，lite/full 均可用）→ `.meta/bm25_index.pkl.gz`（+ 文档词频缓存 `bm25_doc_cache.pkl.gz`；`--rebuild` 忽略缓存全量重建） | 本地 | `--build` / `--rebuild` / `--query "xxx" --top-k N` |
 
@@ -339,7 +339,7 @@ target-vault/
 3. **并发与限速**：MAINTAIN_CONCURRENCY 默认 6，与 API_RATE_LIMIT_MS 配合。触发 API 限流时先调低并发，不要关并发。
 4. **单用户单机假设**：本 harness 默认单机模型。多用户/多机仓库的主从边界需在 Phase 0 画像提示后由用户确认。
 5. **嵌入与 LLM 分层**：语义层是基础能力，默认用**内置本地模型**（fastembed + `bge-small-zh-v1.5`，450 字分块、512 维，零 API），也可切 **HTTP**（任意 OpenAI 兼容 `/embeddings`：Ollama、vLLM、LM Studio、智谱、OpenAI，同一份代码，维度实测）。`EMBED_PROVIDER=auto` 下 HTTP 配置优先、否则内置；`base_url`/`model` 只填一个会报配置错误（不静默降级）；`off` 仅排障用。换来源后必须 `embed.py --full`。LLM 层是可选增强（`HARNESS_MODE=full` + `DEEPSEEK_API_KEY`），**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算。
-6. **能力边界**：语义层未就绪（未装 fastembed、显式 off、端点不可用）时 `ask.py` 自动降级 BM25 并说明原因，`detect_renames.py` 跳过重命名检测；LLM 层关闭时摘要/tag 不存在，`ask.py` 结果无摘要行——这些是取舍而非故障。office 超大/损坏文件超时会跳过并登记，不影响其余文件与基础索引。
+6. **能力边界与恢复**：语义层是基础能力——未就绪时 `ask.py` 临时降级 BM25 并说明原因，但 `maintain` 会以**退出码 3** 结束、`health-report` 会报覆盖率与告警，bootstrap 不可判定完成。恢复三步：① `pip install fastembed`（离线套装用 `15-install-kb-deps.ps1`）；② 模型缓存缺失/损坏 → `-ForceModelCopy` 或设 `HF_ENDPOINT` 后联网首跑；③ 换过模型/维度 → `embed.py --full`。默认模型 `bge-small-zh-v1.5` 是中文 512-token 模型：英文/多语库召回会偏弱，建议切多语模型或 HTTP 端点。<br>LLM 层关闭时摘要/tag 不存在、`ask.py` 结果无摘要行——这是取舍；office 超大/损坏文件超时会跳过并登记，不影响其余文件与基础索引。
 7. **大文件闸门（任一层启用时）**：超 `LARGE_FILE_THRESHOLD_MB`（默认 1MB，`.env` 可调）的单文件被脚本硬性挡在 embed/summarize 外并挂起（`.meta/large-files-pending.md`），**BM25/图谱/manifest 索引照常覆盖该文件**；维护完成后 agent 必须逐个向用户询问 5 个处理选项，决定落 `.meta/rules/large-file-policy.md`（allow / llm_skip / skip；切分与删除完成后删除对应行即自动出清单）。`llm_skip` 会在下次维护清除该文件历史向量。闸门只拦 LLM 管线，不拦 agentic grep/glob 阅读——agent 按用户要求仍可人工读改大文件。
 8. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
 9. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。

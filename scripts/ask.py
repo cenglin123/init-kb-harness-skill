@@ -277,7 +277,8 @@ def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
         return None
 
     try:
-        client = get_embeddings_client(cfg)
+        client = get_embeddings_client(
+            cfg, timeout=float(ENV.get('EMBED_QUERY_TIMEOUT') or 20))
         q_vecs = client.embed_batch([query])
     except Exception as e:
         db.close()
@@ -332,19 +333,22 @@ def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
 
 
 def _run_bm25(query, top_k, scope):
-    """BM25 检索。索引缺失/失败返回 None，与"查到了 0 条"区分开。"""
+    """BM25 检索。索引缺失/损坏/失败返回 None，与"查到了 0 条"区分开。"""
     if bm25_search is None or not (VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz').exists():
         return None
     try:
-        return [
-            # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
-            (path, score)
-            for path, chunk_idx, score in bm25_search(query, top_k=top_k * 4)
-            if path_matches_scope(path, scope)
-        ][:top_k]
+        raw = bm25_search(query, top_k=top_k * 4)
     except Exception as e:
         print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
         return None
+    if raw is None:          # 索引损坏/旧版本：已由 bm25_index 打印原因
+        return None
+    return [
+        # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
+        (path, score)
+        for path, chunk_idx, score in raw
+        if path_matches_scope(path, scope)
+    ][:top_k]
 
 
 def print_results(results):
@@ -700,6 +704,9 @@ def hybrid_search(query, top_k=5, scope='notes', decay_params=None, weights=(0.6
         bm25_raw = bm25_search(query, top_k=top_k*2)
     except Exception as e:
         print(f"⚠️  BM25 检索失败，退化为纯 Dense: {e}", file=sys.stderr)
+        return dense_results
+    if bm25_raw is None:
+        print("⚠️  BM25 索引不可用，hybrid 退化为纯 Dense", file=sys.stderr)
         return dense_results
     if dense_results is None:
         # 语义层运行时不可用：退回纯 BM25（调用方会标注降级）

@@ -19,4 +19,4 @@ python-pptx>=0.6.23
 pypdf>=4.0
 
 # 语义层的基础依赖（内置本地嵌入，默认启用；离线套装已预置 wheel + 模型缓存）
-fastembed>=0.4
+fastembed>=0.9,<0.10   # 0.9 才 local-first（离线缓存优先），勿降到 0.5

@@ -13,6 +13,7 @@ health_report.py — 生成仓库健康报告
 import sys
 import csv
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -214,6 +215,50 @@ def load_deviation_signals():
     return signals
 
 
+def semantic_health(total_notes: int) -> dict:
+    """语义层覆盖率/新鲜度：bootstrap 验收与日常巡检用。"""
+    db = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
+    out = {'ok': False, 'detail': '未建立（.meta/embeddings.sqlite 不存在）',
+           'coverage': 0.0, 'rows': 0, 'model': '', 'dim': 0, 'built_at': ''}
+    if not db.exists():
+        return out
+    try:
+        con = sqlite3.connect(str(db))
+        try:
+            meta = con.execute(
+                "SELECT model, dim, generated_at FROM embed_meta WHERE id=1").fetchone()
+            rows = con.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            paths = {r[0] for r in con.execute("SELECT DISTINCT path FROM embeddings")}
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        out['detail'] = f'库不可读（{e}）'
+        return out
+    if not meta:
+        out['detail'] = '缺少 embed_meta（未完成一次成功构建）'
+        return out
+    note_paths = {p for p in paths if p.endswith('.md') and not p.startswith('.meta/')}
+    out.update({
+        'ok': rows > 0,
+        'rows': rows,
+        'model': meta[0],
+        'dim': meta[1],
+        'built_at': (meta[2] or '')[:19],
+        'coverage': (len(note_paths) / total_notes) if total_notes else 0.0,
+        'detail': f'{len(note_paths)}/{total_notes} 篇笔记有向量',
+    })
+    return out
+
+
+def _count_report_items(path: Path) -> int:
+    """统计挂起/超时清单里的条目数（`- \`...\`` 行），文件不存在返回 0。"""
+    try:
+        return sum(1 for line in path.read_text(encoding='utf-8').splitlines()
+                   if line.startswith('- `'))
+    except Exception:
+        return 0
+
+
 def build_report(total, by_category, inbox, orphans, active_orphans, archived_orphans, sparse, deviation_signals=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -234,7 +279,36 @@ def build_report(total, by_category, inbox, orphans, active_orphans, archived_or
         "",
     ]
 
+    sem = semantic_health(total)
+    pending_large = _count_report_items(VAULT_ROOT / '.meta' / 'large-files-pending.md')
+    office_timeouts = _count_report_items(
+        VAULT_ROOT / '.meta' / 'office-extracts' / '_timeouts.md')
+    sem_lines = [
+        "## 语义层",
+        "",
+        f"- 状态: {'✅ 可用' if sem['ok'] else '⚠️ 不可用'} — {sem['detail']}",
+    ]
+    if sem['model']:
+        sem_lines.append(f"- 模型: `{sem['model']}`（{sem['dim']} 维）")
+    if sem['built_at']:
+        sem_lines.append(f"- 最后构建: {sem['built_at']}")
+    if sem['ok']:
+        sem_lines.append(f"- 覆盖率: {sem['coverage'] * 100:.0f}%（{sem['rows']} 个 chunk）")
+    if pending_large:
+        sem_lines.append(f"- 待决大文件: {pending_large}（见 `.meta/large-files-pending.md`）")
+    if office_timeouts:
+        sem_lines.append(f"- office 提取超时: {office_timeouts}（见 `_timeouts.md`）")
+    sem_lines.append("")
+
+    lines.extend(sem_lines)
+
     alerts = []
+    if not sem['ok']:
+        alerts.append("- ⚠️ 语义层不可用（基础能力缺失）：检索已降级 BM25，"
+                      "修复后重跑维护")
+    elif sem['coverage'] < 0.8:
+        alerts.append(f"- ⚠️ 语义覆盖仅 {sem['coverage'] * 100:.0f}%，"
+                      "检查不可读/超时/挂起清单后重跑维护")
     if len(inbox) > INBOX_ALERT_THRESHOLD:
         alerts.append(f"- ⚠️ 收件箱积压 {len(inbox)} 项，建议归类")
     if len(active_orphans) > ORPHAN_ALERT_THRESHOLD:

@@ -557,6 +557,7 @@ HTTP_CHUNK_DEFAULT = (3000, 300)
 BUILTIN_CHUNK_DEFAULT = (450, 50)
 
 _warned_provider = False
+_warned_mode = False
 
 # reason 码 → 可执行提示（ask/embed/maintain 共用同一套文案）
 EMBED_REASON_HINTS = {
@@ -603,7 +604,8 @@ def embed_settings() -> dict:
     model = (ENV.get('EMBED_MODEL') or '').strip()
     key = (ENV.get('EMBED_API_KEY') or '').strip()
     dim_hint = (ENV.get('EMBED_DIM') or '').strip()
-    if not base and (ENV.get('ZHIPU_API_KEY') or '').strip():
+    # 旧版 ZHIPU_* 迁移只在 http/auto 语义下生效；builtin 不应继承 HTTP 的模型名
+    if raw in ('auto', 'http') and not base and (ENV.get('ZHIPU_API_KEY') or '').strip():
         base = (ENV.get('ZHIPU_BASE_URL') or 'https://open.bigmodel.cn/api/paas/v4').strip().rstrip('/')
         model = model or (ENV.get('ZHIPU_EMBED_MODEL') or 'embedding-3').strip()
         key = key or (ENV.get('ZHIPU_API_KEY') or '').strip()
@@ -634,7 +636,11 @@ def embed_settings() -> dict:
         else:
             reason = 'fastembed_missing'
 
-    if provider == 'builtin' and not model:
+    if provider == 'builtin' and (not model or '/' not in model):
+        if model and not _warned_provider:
+            print(f"⚠️  内置模型忽略非 HF 仓库名 '{model}'，改用 "
+                  f"{BUILTIN_EMBED_DEFAULT_MODEL}", file=sys.stderr)
+            _warned_provider = True
         model = BUILTIN_EMBED_DEFAULT_MODEL
 
     return {
@@ -657,15 +663,35 @@ def embedding_enabled() -> bool:
     return embed_settings()['enabled']
 
 
-def llm_enabled() -> bool:
-    """LLM 层（摘要/精排）可用性单一闸门：有 key 且未被显式 lite 关掉。
+def resolve_mode() -> str:
+    """安装模式：lite | full。非法值按 lite 并告警（不再静默按 legacy 推断）。"""
+    global _warned_mode
+    raw = (ENV.get('HARNESS_MODE') or '').strip().lower()
+    if raw in ('lite', 'full'):
+        return raw
+    if raw and not _warned_mode:
+        print(f"⚠️  无法识别的 HARNESS_MODE='{raw}'（应为 lite|full），按 lite 处理",
+              file=sys.stderr)
+        _warned_mode = True
+    return 'lite'
 
-    未写 HARNESS_MODE 的旧仓库（有 key）视为启用，避免既有安装静默失去精排。
+
+def llm_enabled(mode=None) -> bool:
+    """LLM 层（摘要/精排）可用性唯一闸门：有 key 且模式为 full。
+
+    未写 HARNESS_MODE 的旧仓库（有 key）视为启用，避免既有安装静默失去精排；
+    非法值按 lite（与 resolve_mode 一致），不会出现"显示 lite 却花钱"。
     """
     if not (ENV.get('DEEPSEEK_API_KEY') or '').strip():
         return False
-    mode = (ENV.get('HARNESS_MODE') or '').strip().lower()
-    return mode != 'lite'
+    if mode is not None:
+        return mode == 'full'
+    raw = (ENV.get('HARNESS_MODE') or '').strip().lower()
+    if raw in ('lite', 'full'):
+        return raw == 'full'
+    if raw:
+        return False
+    return True
 
 
 def embed_chunk_defaults() -> tuple:
@@ -682,7 +708,7 @@ class HttpEmbeddingsClient:
 
     provider = 'http'
 
-    def __init__(self, settings=None, batch_size=32):
+    def __init__(self, settings=None, batch_size=32, timeout=120):
         cfg = settings or embed_settings()
         if not cfg['enabled']:
             raise RuntimeError(
@@ -691,7 +717,10 @@ class HttpEmbeddingsClient:
         self.base, self.model, self.key = cfg['base'], cfg['model'], cfg['key']
         self.dim_hint = cfg['dim_hint']
         self.batch_size = int(ENV.get('EMBED_BATCH') or batch_size)
-        self.rate_ms = int(ENV.get('API_RATE_LIMIT_MS') or 200)
+        self.timeout = timeout
+        # 本机端点不限速（200ms 全局限速只针对云端配额）
+        self.rate_ms = 0 if any(h in self.base for h in ('127.0.0.1', 'localhost', '::1')) \
+            else int(ENV.get('API_RATE_LIMIT_MS') or 200)
         self.dim = None
 
     def _headers(self) -> dict:
@@ -706,7 +735,7 @@ class HttpEmbeddingsClient:
         if self.dim_hint:
             payload['dimensions'] = self.dim_hint
         r = requests.post(f'{self.base}/embeddings', headers=self._headers(),
-                          json=payload, timeout=120)
+                          json=payload, timeout=self.timeout)
         if r.status_code == 404:
             raise RuntimeError(
                 f"{self.base}/embeddings 返回 404：请确认 base_url 指向 OpenAI 兼容根"
@@ -749,10 +778,12 @@ class HttpEmbeddingsClient:
 
 
 class BuiltinEmbeddingsClient:
-    """内置本地模型（fastembed + onnxruntime）：没有可用的 HTTP 端点时的降级解。
+    """内置本地模型（fastembed + onnxruntime）：默认的基础嵌入来源。
 
     零 API key、装完即离线可用；首次运行从 HuggingFace 拉模型（可用 HF_ENDPOINT
     指向镜像），缓存在 EMBED_CACHE_DIR（默认 ~/.cache/fastembed）。
+    默认模型 bge-small-zh-v1.5 是中文 512-token 模型：英文/多语库召回会偏弱，
+    这类库建议切到多语模型（如 bge-m3）或 HTTP 端点。
     """
 
     provider = 'builtin'
@@ -803,14 +834,18 @@ class BuiltinEmbeddingsClient:
         return results
 
 
-def get_embeddings_client(settings=None):
-    """按配置返回客户端：HTTP 端点优先，其次内置模型（fastembed）。"""
+def get_embeddings_client(settings=None, timeout=None):
+    """按配置返回客户端：HTTP 端点优先，其次内置模型（fastembed）。
+
+    timeout 只对 HTTP 生效：维护用长超时（120s），查询用短超时（默认 20s），
+    避免端点"挂起而非拒连"时把一次 ask 拖到几分钟。
+    """
     cfg = settings or embed_settings()
     if not cfg['enabled']:
         raise RuntimeError("语义层未启用（EMBED_PROVIDER=off 或无可用的嵌入来源）")
     if cfg['provider'] == 'builtin':
         return BuiltinEmbeddingsClient(cfg)
-    return HttpEmbeddingsClient(cfg)
+    return HttpEmbeddingsClient(cfg, timeout=timeout or 120)
 
 
 # ─── Git 包装 ──────────────────────────────────────────────────────────────
