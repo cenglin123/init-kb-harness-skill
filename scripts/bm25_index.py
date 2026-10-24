@@ -5,7 +5,8 @@ bm25_index.py — BM25 稀疏索引构建与查询（零 API、零嵌入库依�
 
 数据源：直接扫描 vault 语料（用户笔记 + office 提取 sidecar + memory，
 经 common.scan_indexable_notes），按 embed.chunk_text 相同规则分块。
-不依赖 embeddings.sqlite——简化版（lite）默认安装即可用。
+不依赖 embeddings.sqlite——默认安装即可用。
+分块粒度可配（EMBED_CHUNK_CHARS/OVERLAP），缓存记录分块签名，变更后自动全量重算。
 
 v2 实现（index_version=2）：
 - 倒排索引：postings 按 term_id 组织，查询只遍历查询词的 posting 链
@@ -40,6 +41,11 @@ _LEGACY_JSON_FILES = (VAULT_ROOT / '.meta' / 'bm25_index.json.gz',
 
 INDEX_VERSION = 2
 CACHE_VERSION = 2
+# BM25 用自己固定的分块粒度：不能被可选语义层的 provider 改变——否则开/关语义层
+# 会静默改变基础检索的粒度与排序。签名只随这里的常量变。
+BM25_CHUNK_CHARS = 3000
+BM25_CHUNK_OVERLAP = 300
+CHUNK_SIG = f'bm25-{BM25_CHUNK_CHARS}/{BM25_CHUNK_OVERLAP}'
 K1 = 1.5
 B = 0.75
 # 语料文件数低于该阈值时串行分词（进程池启动开销不划算）；否则并行
@@ -101,6 +107,9 @@ def _load_cache():
             cache = pickle.load(f)
         if cache.get('cache_version') != CACHE_VERSION:
             return {}
+        if cache.get('chunk_sig') != CHUNK_SIG:
+            print("  [cache] 分块规则已变化，词频缓存作废，全量重算", file=sys.stderr)
+            return {}
         return cache.get('docs', {})
     except Exception as e:
         print(f"  [cache] 词频缓存损坏，忽略（{e}）", file=sys.stderr)
@@ -136,7 +145,8 @@ def build_index(rebuild=False):
     # ── 3. 对待算文件分块 + 分词（文件数达标时并行） ──
     chunks_by_rel = {}  # rel -> [[chunk_idx, doc_len, {term: freq}], ...]
     if pending:
-        texts_by_rel = {rel: chunk_text(content) for rel, content, _ in pending}
+        texts_by_rel = {rel: chunk_text(content, BM25_CHUNK_CHARS, BM25_CHUNK_OVERLAP)
+                        for rel, content, _ in pending}
         token_lists = {}  # rel -> [[token, ...], ...]
         if len(pending) >= PARALLEL_MIN_FILES:
             try:
@@ -222,7 +232,8 @@ def build_index(rebuild=False):
     }
 
     _write_gzip_atomically(BM25_INDEX_PATH, index)
-    _write_gzip_atomically(BM25_CACHE_PATH, {'cache_version': CACHE_VERSION, 'docs': cache})
+    _write_gzip_atomically(BM25_CACHE_PATH, {
+        'cache_version': CACHE_VERSION, 'chunk_sig': CHUNK_SIG, 'docs': cache})
     for legacy in _LEGACY_JSON_FILES:
         legacy.unlink(missing_ok=True)  # v2.0 json 格式残留清理
     elapsed = (datetime.now() - start).total_seconds()

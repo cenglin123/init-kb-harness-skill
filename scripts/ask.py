@@ -3,12 +3,13 @@
 """
 ask.py — 语义查询 / 查重 / 孤儿检测
 
-简化版（lite，无 embeddings.sqlite）下自动降级：默认查询与 --check 走 BM25 本地检索，
---hybrid 降级为纯 BM25，--deep / --rerank 不可用（需完整版 embeddings + DeepSeek）。
---orphans / --backlinks / --neighbors / --path 为本地能力，两种模式均可用。
+语义层是默认能力（内置本地模型或任意 OpenAI 兼容 /embeddings）。
+运行时不可用（库空 / 维度不符 / 端点断 / 库损坏）时自动降级 BM25 并说明原因，
+绝不静默返回"未找到"。--deep / --rerank 需要 LLM 层（HARNESS_MODE=full + key）。
+--orphans / --backlinks / --neighbors / --path 为本地能力，始终可用。
 
 用法:
-    python .meta/scripts/ask.py "问题"                    # 语义检索（简化版自动降级 BM25）
+    python .meta/scripts/ask.py "问题"                    # 语义检索（不可用时自动回 BM25）
     python .meta/scripts/ask.py --check "打算写的主题"     # 写前查重
     python .meta/scripts/ask.py --orphans                  # 孤儿笔记清单
     python .meta/scripts/ask.py --backlinks "目标笔记"      # 反向链接查询
@@ -29,12 +30,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
-    VAULT_ROOT, scan_notes, rel_path, meta_mirror, ensure_parent, ZhipuEmbedClient,
+    VAULT_ROOT, scan_notes, rel_path, meta_mirror, ensure_parent,
+    get_embeddings_client, embed_settings, embed_unavailable_hint,
+    llm_enabled, ENV,
     find_all_wikilinks, find_all_mdlinks, iter_markdown_content_lines,
     WIKILINK_RE, resolve_wikilink, resolve_mdlink, parse_aliases, log_script_run,
     rerank_with_llm, office_extract_source,
 )
-from embed import blob_to_embedding
+from embed import read_meta
 try:
     from build_graph import get_neighbors, find_shortest_path
 except ImportError:
@@ -54,7 +57,7 @@ SECONDS_PER_YEAR = 365.25 * 86400
 EMBEDDINGS_WARN_THRESHOLD = 40000
 
 # === 低置信自动升级配置（初始启发式，随 .meta/escalation-stats.jsonl 校准数据重设）===
-ESCALATION_THRESHOLD = 0.6             # final top-1 < 此值 → low_confidence（作用于含 --decay 的 final score）
+ESCALATION_THRESHOLD = float(ENV.get('ESCALATION_THRESHOLD') or 0.6)  # final top-1 < 此值 → low_confidence
 ESCALATION_HYBRID_WEIGHTS = (0.3, 0.7) # (dense, bm25)；BM25 重权，对症 tag/字面失配
 GRAY_ZONE_LO, GRAY_ZONE_HI = 0.5, 0.7  # 衰减感知灰区 final score 区间
 GRAY_ZONE_AGE_YEARS = 1.0              # 灰区要求 top-1 结果 age > 此年数
@@ -110,10 +113,11 @@ def save_query_results(query: str, results: list, is_check: bool, method: str = 
     filename = f"query-{timestamp}-{slug}.md"
     path = VAULT_ROOT / '.meta' / 'syntheses' / 'queries' / filename
 
+    embed_model = (embed_settings().get('model') or 'embedding')
     model_by_method = {
-        'dense': 'zhipu-embedding-3',
+        'dense': embed_model,
         'bm25': 'bm25-local',
-        'hybrid': 'bm25-local + zhipu-embedding-3',
+        'hybrid': f'bm25-local + {embed_model}',
     }
 
     lines = [
@@ -234,32 +238,90 @@ def apply_time_decay(path: str, sim: float, decay_params: tuple | None = None) -
 
 def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
     if not DB_PATH.exists():
-        print("⚠️  embeddings.sqlite 不存在（简化版模式无语义检索）。请用 --bm25，"
-              "或配置 API key 并以 HARNESS_MODE=full 跑维护生成嵌入库。")
-        return []
+        print("⚠️  语义层尚未建立（.meta/embeddings.sqlite 不存在）。请用 --bm25，"
+              "或配置嵌入来源后跑维护生成向量。")
+        return None
+    cfg = embed_settings()
+    if not cfg['enabled']:
+        print(f"⚠️  语义层不可用：{embed_unavailable_hint(cfg)}")
+        return None
 
     db = sqlite3.connect(str(DB_PATH))
-    # 增长预警：SQLite COUNT(*) 无 WHERE 时使用 B-tree 根页 nRec，O(1)
-    row_count = db.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    try:
+        # 增长预警：SQLite COUNT(*) 无 WHERE 时使用 B-tree 根页 nRec，O(1)
+        row_count = db.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    except sqlite3.Error as e:
+        db.close()
+        print(f"⚠️  嵌入库不可读（{e}）；请跑 "
+              f"python .meta/scripts/embed.py --full 重建", file=sys.stderr)
+        return None
     if row_count > EMBEDDINGS_WARN_THRESHOLD:
         print(
             f"⚠️  embeddings 表已 {row_count} 行（阈值 {EMBEDDINGS_WARN_THRESHOLD}），"
             f"全表余弦扫描可能变慢。考虑定期清理旧块或引入 ANN 索引。",
             file=sys.stderr,
         )
-    client = ZhipuEmbedClient()
-    q_vec = np.array(client.embed_batch([query])[0])
-    q_norm = np.linalg.norm(q_vec)
+    if row_count == 0:
+        db.close()
+        print("⚠️  嵌入库为空（可能正在重建）。请用 --bm25，或跑 "
+              "python .meta/scripts/embed.py --full", file=sys.stderr)
+        return None
 
+    # 先用元数据核对，再加载模型：不一致时不白付一次模型加载/网络调用
+    meta = read_meta(db)
+    if meta and meta['model'] != cfg['model']:
+        db.close()
+        print(f"⚠️  嵌入库为 {meta['model']}（{meta['dim']} 维），当前来源为 "
+              f"{cfg['model']}；请重建：python .meta/scripts/embed.py --full",
+              file=sys.stderr)
+        return None
+
+    try:
+        client = get_embeddings_client(cfg)
+        q_vecs = client.embed_batch([query])
+    except Exception as e:
+        db.close()
+        print(f"⚠️  嵌入来源不可用：{e}", file=sys.stderr)
+        return None
+    if not q_vecs or q_vecs[0] is None:
+        db.close()
+        print("⚠️  查询嵌入失败，请重试或检查嵌入来源配置", file=sys.stderr)
+        return None
+    q_vec = np.array(q_vecs[0], dtype='<f4')
+    q_norm = float(np.linalg.norm(q_vec))
+    if meta and meta['dim'] != len(q_vec):
+        db.close()
+        print(f"⚠️  嵌入库为 {meta['dim']} 维，当前来源返回 {len(q_vec)} 维；"
+              f"请重建：python .meta/scripts/embed.py --full", file=sys.stderr)
+        return None
+
+    # 分批解码：语义层在大库上可能是数万行，一次性 join 会有内存峰值。
+    # 用 rowid 递增翻页（OFFSET 会随表变化漂移）。
     best = {}
-    for row in db.execute("SELECT path, embedding FROM embeddings"):
-        path, blob = row
-        if not path_matches_scope(path, scope):
+    batch = 2048
+    last_rowid = 0
+    dim = len(q_vec)
+    while True:
+        rows = db.execute(
+            "SELECT rowid, path, embedding FROM embeddings WHERE rowid > ? "
+            "ORDER BY rowid LIMIT ?", (last_rowid, batch)).fetchall()
+        if not rows:
+            break
+        last_rowid = rows[-1][0]
+        sel = [(p, b) for _, p, b in rows if path_matches_scope(p, scope)]
+        if not sel:
             continue
-        v = np.array(blob_to_embedding(blob))
-        sim = float(np.dot(q_vec, v) / (q_norm * np.linalg.norm(v) + 1e-10))
-        if path not in best or sim > best[path]:
-            best[path] = sim
+        if any(len(b) != dim * 4 for _, b in sel):
+            db.close()
+            print("⚠️  嵌入库中存在维度不一致的记录，请重建："
+                  "python .meta/scripts/embed.py --full", file=sys.stderr)
+            return None
+        mat = np.frombuffer(b''.join(b for _, b in sel), dtype='<f4').reshape(len(sel), dim)
+        sims = (mat @ q_vec) / (np.linalg.norm(mat, axis=1) * q_norm + 1e-10)
+        for (path, _), sim in zip(sel, sims):
+            s = float(sim)
+            if path not in best or s > best[path]:
+                best[path] = s
     db.close()
 
     # 应用时间衰减后重新排序
@@ -267,6 +329,22 @@ def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
         [(p, apply_time_decay(p, s, decay_params)) for p, s in best.items()],
         key=lambda x: -x[1]
     )[:top_k]
+
+
+def _run_bm25(query, top_k, scope):
+    """BM25 检索。索引缺失/失败返回 None，与"查到了 0 条"区分开。"""
+    if bm25_search is None or not (VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz').exists():
+        return None
+    try:
+        return [
+            # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
+            (path, score)
+            for path, chunk_idx, score in bm25_search(query, top_k=top_k * 4)
+            if path_matches_scope(path, scope)
+        ][:top_k]
+    except Exception as e:
+        print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
+        return None
 
 
 def print_results(results):
@@ -318,20 +396,8 @@ def find_orphans():
                 stem = t[:-3] if t.endswith('.md') else t
                 referenced.add(stem)
 
-    # 扫 .meta/links/（Agent 生成的 [[wikilink]] 格式链接，来源含 [[]] 和 []() 两种语法）
-    links_dir = VAULT_ROOT / '.meta' / 'links'
-    if links_dir.exists():
-        for md in links_dir.rglob('*.md'):
-            try:
-                content = md.read_text(encoding='utf-8')
-            except:
-                continue
-            for target in find_all_wikilinks(content):
-                t = target.strip()
-                if '/' in t:
-                    referenced.add(Path(t).stem)
-                else:
-                    referenced.add(t)
+    # 注：不扫 .meta/links/——那是 Agent 生成的语义关联，不是"用户引用"。
+    # 否则开了语义层后孤儿数会凭空下降（与 health_report 的 in_degree_wiki 口径不一致）。
 
     orphans = []
     for md in scan_notes():
@@ -635,6 +701,13 @@ def hybrid_search(query, top_k=5, scope='notes', decay_params=None, weights=(0.6
     except Exception as e:
         print(f"⚠️  BM25 检索失败，退化为纯 Dense: {e}", file=sys.stderr)
         return dense_results
+    if dense_results is None:
+        # 语义层运行时不可用：退回纯 BM25（调用方会标注降级）
+        print("⚠️  语义层不可用，hybrid 退化为纯 BM25", file=sys.stderr)
+        best = {}
+        for path, _chunk, score in bm25_raw:
+            best[path] = max(best.get(path, 0.0), score)
+        return sorted(best.items(), key=lambda x: -x[1])[:top_k]
 
     # Build lookup: path -> {dense_score, bm25_score}
     combined = {}
@@ -830,7 +903,8 @@ def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=Tr
         branches.append(f'hybrid_failed:{type(e).__name__}')
 
     # 分支 2：deep（抽象主题 — low_conf 且非 tag_miss，即字面未失配但语义召回弱）
-    if low_conf and not tag_miss:
+    # LLM 层未启用时直接跳过，不制造 *_failed 噪声、也不写脏 calibration 数据
+    if low_conf and not tag_miss and llm_enabled():
         try:
             rounds = deep_search(query, iterations=2, breadth=max(top_k, 5),
                                  scope=scope, decay_params=decay_params)
@@ -843,7 +917,7 @@ def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=Tr
             branches.append(f'deep_failed:{type(e).__name__}')
 
     # 分支 3：rerank（候选 ≥10 时精排；allow_rerank=False 跳过，如用户已传 --rerank）
-    if allow_rerank and len(best) >= 10:
+    if allow_rerank and len(best) >= 10 and llm_enabled():
         try:
             cand = sorted(best.items(), key=lambda x: -x[1])[:20]
             rr = rerank_results(query, cand, top_m=top_k)
@@ -930,16 +1004,25 @@ def main():
 
     query = args.query
 
-    # ─── 简化版（lite）降级：无 embeddings.sqlite 时 dense/hybrid/deep/rerank 不可用 ───
-    has_embeddings = DB_PATH.exists()
-    if not has_embeddings:
+    # ─── 能力闸门：语义层（基础）与 LLM 层（可选）分开判定 ───
+    cfg = embed_settings()
+    semantic_ready = DB_PATH.exists() and cfg['enabled']
+    if not cfg['enabled']:
+        semantic_reason = embed_unavailable_hint(cfg)
+    else:
+        semantic_reason = '嵌入库尚未建立（.meta/embeddings.sqlite 不存在）'
+    if not semantic_ready:
         if args.deep:
-            print("错误：--deep 需要完整版（embeddings + DeepSeek）。简化版请用 --bm25 检索，"
+            print(f"错误：--deep 需要语义层（{semantic_reason}）。请用 --bm25，"
                   "或由 agent 做 agentic grep/glob 多跳检索。", file=sys.stderr)
             sys.exit(2)
         if args.rerank:
-            print("错误：--rerank 需要完整版（embeddings.sqlite 提供 chunk 文本 + DeepSeek 精排）。", file=sys.stderr)
+            print(f"错误：--rerank 需要语义层（{semantic_reason}）。", file=sys.stderr)
             sys.exit(2)
+    if (args.deep or args.rerank) and not llm_enabled():
+        print("错误：--deep / --rerank 需要 LLM 层（HARNESS_MODE=full + DEEPSEEK_API_KEY）。"
+              "语义层只提供向量召回，不提供查询扩展与精排。", file=sys.stderr)
+        sys.exit(2)
 
     # 解析 --decay 参数（--deep 和普通检索共享）
     decay_params = None
@@ -959,13 +1042,13 @@ def main():
     use_hybrid = args.hybrid
     use_bm25 = args.bm25
 
-    if not has_embeddings and not use_bm25:
-        # 简化版（lite）：dense/hybrid 自动降级为 BM25 本地检索
+    if not semantic_ready and not use_bm25:
+        # 语义层不可用：dense/hybrid 自动降级为 BM25，并说明原因
         if use_hybrid:
-            print("  [简化版] 无 embeddings.sqlite，--hybrid 降级为纯 BM25 检索", file=sys.stderr)
+            print(f"  [语义层不可用·{semantic_reason}] --hybrid 降级为纯 BM25 检索", file=sys.stderr)
             use_hybrid = False
         else:
-            print("  [简化版] 无 embeddings.sqlite，自动使用 BM25 本地检索"
+            print(f"  [语义层不可用·{semantic_reason}] 自动使用 BM25 本地检索"
                   "（复杂主题检索建议由 agent 做 agentic grep/glob）", file=sys.stderr)
         use_bm25 = True
 
@@ -1046,29 +1129,40 @@ def main():
     if use_hybrid:
         results = hybrid_search(query, top_k=top_k, scope=args.scope, decay_params=decay_params, weights=hybrid_weights)
         retrieval_method = 'hybrid'
+        if results is None:
+            results = _run_bm25(query, top_k, args.scope)
+            if results is None:
+                print("错误：语义层与 BM25 索引都不可用，无法检索（请跑 maintain.py 重建）。",
+                      file=sys.stderr)
+                sys.exit(2)
+            retrieval_method = 'bm25'
     elif use_bm25:
         retrieval_method = 'bm25'
-        if not (VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz').exists():
-            print("⚠️  BM25 索引不存在，请先运行 python .meta/scripts/maintain.py"
-                  "（或 python .meta/scripts/bm25_index.py --build）。")
-            results = []
-        else:
-            try:
-                # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
-                results = [
-                    (path, score)
-                    for path, chunk_idx, score in bm25_search(query, top_k=top_k * 4)
-                    if path_matches_scope(path, args.scope)
-                ][:top_k]
-            except Exception as e:
-                print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
-                results = []
+        results = _run_bm25(query, top_k, args.scope)
+        if results is None:
+            print("错误：BM25 索引不存在或不可用——检索无法进行。请先运行 "
+                  "python .meta/scripts/maintain.py（或 bm25_index.py --build）。",
+                  file=sys.stderr)
+            if args.check:
+                print("（写前查重不可用：不要把本次结果当作'没有重复'）", file=sys.stderr)
+            sys.exit(2)
     else:
         retrieval_method = 'dense'
         results = semantic_search(query, top_k=top_k, scope=args.scope, decay_params=decay_params)
+        if results is None:
+            # 运行时不可用（空库/维度不符/端点断）：回退 BM25，绝不静默返回"没有"
+            results = _run_bm25(query, top_k, args.scope)
+            if results is None:
+                print("错误：语义层与 BM25 索引都不可用，无法检索。"
+                      "请跑 python .meta/scripts/maintain.py 重建。", file=sys.stderr)
+                if args.check:
+                    print("（写前查重不可用：不要把本次结果当作'没有重复'）", file=sys.stderr)
+                sys.exit(2)
+            retrieval_method = 'bm25'
+            print(f"  [语义层运行时不用] 已回退 BM25 检索", file=sys.stderr)
         # 低置信自动升级（Phase 1a）：仅默认 dense 查询路径 + 非 --check。
         # --hybrid/--bm25/--deep 走其他分支/早退，天然不触发（A.2）；--rerank 时 allow_rerank=False 避免双重精排
-        if not args.check:
+        elif not args.check:
             _esc, _esc_log = auto_escalate(
                 query, results, top_k=top_k, scope=args.scope,
                 decay_params=decay_params, allow_rerank=not args.rerank,

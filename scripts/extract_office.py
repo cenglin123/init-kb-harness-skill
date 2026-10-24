@@ -8,7 +8,9 @@ extract_office.py — office 文档纯文本提取（sidecar 机制）
 纳入检索链路。检索命中 sidecar 时，ask.py 会显示指向源 office 文件。
 
 - 增量：源文件 content_hash 未变则跳过（--full 强制重提）
-- 并发：ThreadPoolExecutor（MAINTAIN_CONCURRENCY，默认 6）
+- 并发：默认 MAINTAIN_CONCURRENCY 路并行
+- 超时：每个文件独立子进程执行，超过 OFFICE_EXTRACT_TIMEOUT_S（默认 120s）即终止并跳过，
+        清单写入 .meta/office-extracts/_timeouts.md（大文件/损坏文件不会拖死整轮维护）
 - 孤儿清理：源文件删除/改名后对应 sidecar 自动删除
 - 老格式 .doc/.xls/.ppt 不提取，清单写入 _legacy-formats.md 提示用户转存新格式
 - 隐私目录（category-privacy.md / PRIVACY_DIRS）内文件不扫描、不提取
@@ -16,10 +18,12 @@ extract_office.py — office 文档纯文本提取（sidecar 机制）
 用法:
     python .meta/scripts/extract_office.py           # 增量
     python .meta/scripts/extract_office.py --full    # 全量重提
+    python .meta/scripts/extract_office.py --one <rel> --hash <h>   # 单文件 worker（内部用）
 """
 
 import sys
 import argparse
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -35,8 +39,13 @@ from common import (
 MAX_CHARS = int(ENV.get('OFFICE_EXTRACT_MAX_CHARS', '200000'))
 # xlsx 每 sheet 最大行数（0 = 不限）
 MAX_ROWS_PER_SHEET = int(ENV.get('OFFICE_EXTRACT_MAX_ROWS', '2000'))
+# 单文件硬超时（秒，可为小数）；0 = 不限
+EXTRACT_TIMEOUT_S = float(ENV.get('OFFICE_EXTRACT_TIMEOUT_S') or 120)
+# 并发路数（子进程）
+WORKERS = int(ENV.get('OFFICE_EXTRACT_WORKERS') or MAINTAIN_CONCURRENCY)
 
 LEGACY_REPORT = OFFICE_EXTRACTS_DIR / '_legacy-formats.md'
+TIMEOUT_REPORT = OFFICE_EXTRACTS_DIR / '_timeouts.md'
 
 
 # ─── 各格式提取器（缺依赖时该格式整体跳过并提示）──────────────────────────
@@ -126,6 +135,8 @@ EXTRACTORS = {
     '.pptx': ('python-pptx', _extract_pptx),
     '.pdf': ('pypdf', _extract_pdf),
 }
+IMPORT_NAMES = {'python-docx': 'docx', 'openpyxl': 'openpyxl',
+                'python-pptx': 'pptx', 'pypdf': 'pypdf'}
 
 
 # ─── sidecar 读写 ──────────────────────────────────────────────────────────
@@ -170,26 +181,31 @@ def write_sidecar(src_rel: str, h: str, extractor: str, text: str, sc: Path):
     sc.write_text(fm + body + '\n', encoding='utf-8', newline='')
 
 
-def _extract_one(src: Path, full: bool):
-    """单文件提取。返回 (rel, status, message)；status ∈ {ok, skip, fail}。"""
-    rel = rel_path(src)
-    ext = src.suffix.lower()
-    lib, fn = EXTRACTORS[ext]
-    sc = sidecar_path(src)
-    h = content_hash(src)
-    if not full and sc.exists() and sidecar_hash(sc) == h:
-        return rel, 'skip', ''
+def _extract_one(src: Path, rel: str, h: str) -> tuple:
+    """worker：提取单个文件并写 sidecar。返回 (status, message)。"""
+    lib, fn = EXTRACTORS[src.suffix.lower()]
+    text = fn(src)
+    write_sidecar(rel, h, lib, text, sidecar_path(src))
+    return 'ok', f'{len(text)} 字符'
+
+
+# ─── 并发调度（子进程 + 硬超时，超时可终止）────────────────────────────────
+
+def _run_worker(rel: str, h: str):
+    cmd = [sys.executable, str(Path(__file__).resolve()), '--one', rel, '--hash', h]
     try:
-        text = fn(src)
-    except ImportError:
-        return rel, 'fail', f'缺依赖 {lib}（pip install {lib}）'
-    except Exception as e:
-        return rel, 'fail', f'{type(e).__name__}: {e}'
-    write_sidecar(rel, h, lib, text, sc)
-    return rel, 'ok', f'{len(text)} 字符'
+        r = subprocess.run(cmd, cwd=str(VAULT_ROOT), capture_output=True,
+                           text=True, encoding='utf-8', errors='replace',
+                           timeout=(EXTRACT_TIMEOUT_S or None))
+    except subprocess.TimeoutExpired:
+        return rel, 'timeout', f'超过 {EXTRACT_TIMEOUT_S}s'
+    if r.returncode == 0:
+        return rel, 'ok', (r.stdout or '').strip().splitlines()[-1] if r.stdout else ''
+    tail = ((r.stderr or '') + (r.stdout or '')).strip().splitlines()
+    return rel, 'fail', tail[-1] if tail else f'exit {r.returncode}'
 
 
-# ─── 孤儿清理 / 老格式登记 ────────────────────────────────────────────────
+# ─── 孤儿清理 / 报告 ──────────────────────────────────────────────────────
 
 def cleanup_orphans(valid_sidecars: set) -> int:
     """删除源文件已不存在的 sidecar。"""
@@ -223,12 +239,30 @@ def report_legacy():
     return legacy
 
 
+def report_timeouts(rows: list):
+    if not rows:
+        if TIMEOUT_REPORT.exists():
+            TIMEOUT_REPORT.unlink()
+        return
+    lines = [
+        '# office 提取超时（本轮跳过）',
+        '',
+        f'> 单文件超过 {EXTRACT_TIMEOUT_S}s 上限，已终止并跳过。',
+        '> 可调 `.env:OFFICE_EXTRACT_TIMEOUT_S` 放宽，或先拆分/转存该文件。',
+        '',
+    ]
+    lines += [f'- `{rel}` — {msg}' for rel, msg in rows]
+    ensure_parent(TIMEOUT_REPORT)
+    TIMEOUT_REPORT.write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='')
+
+
 # ─── 主流程 ────────────────────────────────────────────────────────────────
 
 def main(full=False):
     all_docs = sorted(scan_office_docs(), key=rel_path)
     docs = list(all_docs)
-    print(f"  office 文档: {len(docs)} 个（扩展名 {', '.join(sorted(OFFICE_EXTRACT_EXTS))}）")
+    print(f"  office 文档: {len(docs)} 个（扩展名 {', '.join(sorted(OFFICE_EXTRACT_EXTS))}，"
+          f"并发 {WORKERS}，单文件超时 {EXTRACT_TIMEOUT_S}s）")
 
     # 缺依赖的格式整体提示（提前探测，避免每文件重复报错）
     missing = []
@@ -236,8 +270,7 @@ def main(full=False):
     for ext in sorted(present_exts):
         lib, _ = EXTRACTORS[ext]
         try:
-            __import__({'python-docx': 'docx', 'openpyxl': 'openpyxl',
-                        'python-pptx': 'pptx', 'pypdf': 'pypdf'}[lib])
+            __import__(IMPORT_NAMES[lib])
         except ImportError:
             missing.append((ext, lib))
     if missing:
@@ -246,41 +279,76 @@ def main(full=False):
         skip_exts = {ext for ext, _ in missing}
         docs = [d for d in docs if d.suffix.lower() not in skip_exts]
 
+    # 父进程先做 hash 判定，避免为未变文件起子进程
+    todo = []
+    for d in docs:
+        h = content_hash(d)
+        sc = sidecar_path(d)
+        if not full and sc.exists() and sidecar_hash(sc) == h:
+            continue
+        todo.append((d, rel_path(d), h))
+
     ok = skipped = failed = 0
-    if docs:
-        with ThreadPoolExecutor(max_workers=MAINTAIN_CONCURRENCY) as pool:
-            futures = {pool.submit(_extract_one, d, full): d for d in docs}
+    skipped = len(docs) - len(todo)
+    timed_out = []
+    if todo:
+        with ThreadPoolExecutor(max_workers=max(1, WORKERS)) as pool:
+            futures = {pool.submit(_run_worker, rel, h): rel for _, rel, h in todo}
             for fut in as_completed(futures):
                 rel, status, msg = fut.result()
                 if status == 'ok':
                     ok += 1
                     print(f"  ✓ {rel} ({msg})")
-                elif status == 'skip':
-                    skipped += 1
+                elif status == 'timeout':
+                    timed_out.append((rel, msg))
+                    print(f"  ⏱ {rel}: {msg}（已跳过，见 _timeouts.md）")
+                    failed += 1
                 else:
                     failed += 1
                     print(f"  ✗ {rel}: {msg}")
 
     # 孤儿判定基于全部扫描到的源文件（含因缺依赖本轮跳过的格式）——
-    # 只有源文件真正消失才算孤儿，依赖缺失不触发误删
+    # 只有源文件真正消失才算孤儿，依赖缺失/超时不触发误删
     valid = {sidecar_path(d) for d in all_docs}
     removed = cleanup_orphans(valid)
     legacy = report_legacy()
+    report_timeouts(timed_out)
 
-    print(f"  ✓ office 提取完成：{ok} 提取 / {skipped} 未变跳过 / {failed} 失败 / {removed} 孤儿清理")
+    print(f"  ✓ office 提取完成：{ok} 提取 / {skipped} 未变跳过 / {failed} 失败"
+          f"（其中 {len(timed_out)} 超时） / {removed} 孤儿清理")
     if legacy:
         print(f"  ⚠️  {len(legacy)} 个老格式文件无法提取（见 .meta/office-extracts/_legacy-formats.md）")
+    if timed_out:
+        print(f"  ⚠️  {len(timed_out)} 个文件超时跳过（见 .meta/office-extracts/_timeouts.md）；"
+              f"可调 OFFICE_EXTRACT_TIMEOUT_S 或拆分文件")
     return 0
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='office 文档纯文本提取（sidecar）')
+    parser.add_argument('--full', action='store_true', help='忽略 hash 全量重提')
+    parser.add_argument('--one', help=argparse.SUPPRESS)   # worker 模式
+    parser.add_argument('--hash', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
     # --- host guard ---
     from common import is_primary_host
     if not is_primary_host():
         print("FATAL: this script must run on PRIMARY_HOST", file=sys.stderr)
         sys.exit(1)
     # --- /host guard ---
-    parser = argparse.ArgumentParser(description='office 文档纯文本提取（sidecar）')
-    parser.add_argument('--full', action='store_true', help='忽略 hash 全量重提')
-    args = parser.parse_args()
+
+    if args.one:
+        src = VAULT_ROOT / args.one
+        try:
+            status, msg = _extract_one(src, args.one, args.hash or content_hash(src))
+        except ImportError as e:
+            print(f"缺依赖: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"{type(e).__name__}: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(msg)
+        sys.exit(0)
+
     sys.exit(main(full=args.full))

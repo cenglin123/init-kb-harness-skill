@@ -5,7 +5,7 @@ common.py — 所有维护脚本的共用工具
 
 提供：
 - 环境变量加载（.env）
-- API 客户端（DeepSeek、智谱）
+- API 客户端（DeepSeek）+ 嵌入客户端（通用 OpenAI 兼容 /embeddings）
 - 路径/哈希/扫描工具
 - Git 包装
 - 主从检测
@@ -67,7 +67,8 @@ ENV = load_env()
 VAULT_ROOT = find_vault_root()
 
 # ─── 图与向量公共常量 ──────────────────────────────────────────────────────────
-SEMANTIC_THRESHOLD = 0.75   # semantic 边保留阈值（build_graph 构造 + get_neighbors 遍历共享）
+# semantic 边保留阈值（build_graph 构造 + get_neighbors 遍历共享）；换嵌入模型后可校准
+SEMANTIC_THRESHOLD = float(ENV.get('SEMANTIC_THRESHOLD') or 0.75)
 
 # ─── 排除规则 ──────────────────────────────────────────────────────────────
 def _load_privacy_dirs() -> set:
@@ -225,7 +226,7 @@ def rel_path(p: Path) -> str:
     """统一用正斜杠的相对路径"""
     return str(p.relative_to(VAULT_ROOT)).replace('\\', '/')
 
-# ─── 大文件闸门（硬约束，完整版 LLM 管线）───────────────────────────────────
+# ─── 大文件闸门（硬约束，嵌入/LLM 管线共用）─────────────────────────────────
 # 单文件超过阈值（默认 1MB）不直接进入嵌入/LLM 管线（embed / summarize），
 # 由脚本硬性挡下并登记挂起；维护完成后由 agent 向用户询问处理方式，决定写入
 # .meta/rules/large-file-policy.md 后生效。检查编码在脚本内执行，不依赖 agent 自觉。
@@ -541,72 +542,275 @@ class DeepSeekClient:
             return []
 
 
-class ZhipuEmbedClient:
-    def __init__(self):
-        self.key = ENV.get('ZHIPU_API_KEY')
-        self.base = ENV.get('ZHIPU_BASE_URL', 'https://open.bigmodel.cn/api/paas/v4')
-        self.model = ENV.get('ZHIPU_EMBED_MODEL', 'embedding-3')
-        self.dim = int(ENV.get('ZHIPU_EMBED_DIM', '2048'))
-        self.rate_ms = int(ENV.get('API_RATE_LIMIT_MS', '200'))
-        if not self.key:
-            raise RuntimeError("ZHIPU_API_KEY 未设置")
+# ─── 嵌入层（基础能力，必需；HTTP 端点优先，内置模型兜底）──────────────────
+# 语义层是本套件的基础能力（office/非结构化仓库要靠它召回），默认启用：
+#   auto  → 配了 base_url+model 走 HTTP；否则用内置 fastembed 模型
+#   http  → 必须 base_url + model
+#   builtin → 必须装有 fastembed
+#   off   → 显式关闭（仅排障用；maintain/ask 会明确告警）
+# 只有 LLM 层（摘要/精排）是可选增强。
+EMBED_PROVIDERS = ('auto', 'http', 'builtin', 'off')
+BUILTIN_EMBED_DEFAULT_MODEL = 'BAAI/bge-small-zh-v1.5'
+# 分块默认值跟传输方式走：本地 bge-small 是 512 token（≈450 中文字符），
+# HTTP 端点默认按 8k 上下文给 3000 字符。
+HTTP_CHUNK_DEFAULT = (3000, 300)
+BUILTIN_CHUNK_DEFAULT = (450, 50)
 
-    def _post_embed(self, batch: list):
+_warned_provider = False
+
+# reason 码 → 可执行提示（ask/embed/maintain 共用同一套文案）
+EMBED_REASON_HINTS = {
+    'off': "语义层被显式关闭（EMBED_PROVIDER=off）；它是本套件的基础能力，"
+           "除非排障否则请改回 auto",
+    'missing_http': "EMBED_BASE_URL 与 EMBED_MODEL 必须成对填写（当前只填了一个）",
+    'fastembed_missing': "内置嵌入模型不可用：请 pip install fastembed"
+                         "（离线套装在 assets/packages/kb-harness/wheels）",
+    'unknown_provider': "无法识别的 EMBED_PROVIDER（应为 auto|http|builtin|off）",
+}
+
+
+def _fastembed_available() -> bool:
+    try:
+        import importlib.util
+        return importlib.util.find_spec('fastembed') is not None
+    except Exception:
+        return False
+
+
+def embed_settings() -> dict:
+    """解析语义层配置：provider ∈ {http, builtin, None} + 失败原因码。
+
+    解析顺序（纯配置，不读数据库，避免把派生状态当真相）：
+        EMBED_PROVIDER=off      → 关闭（reason=off）
+        EMBED_PROVIDER=http     → 必须 base_url + model（否则 missing_http）
+        EMBED_PROVIDER=builtin  → 必须装有 fastembed（否则 fastembed_missing）
+        auto（默认）            → base_url+model 走 http；
+                                  只填了一个 → missing_http（不静默降级）；
+                                  都没填且装有 fastembed → builtin
+    只填了旧版 ZHIPU_* 的仓库自动沿用为 http，避免既有安装静默降级。
+    """
+    global _warned_provider
+    raw = (ENV.get('EMBED_PROVIDER') or 'auto').strip().lower()
+    reason = ''
+    if raw not in EMBED_PROVIDERS:
+        reason = 'unknown_provider'
+        if not _warned_provider:
+            print(f"⚠️  EMBED_PROVIDER='{raw}' 无法识别，按 auto 处理", file=sys.stderr)
+            _warned_provider = True
+        raw = 'auto'
+
+    base = (ENV.get('EMBED_BASE_URL') or '').strip().rstrip('/')
+    model = (ENV.get('EMBED_MODEL') or '').strip()
+    key = (ENV.get('EMBED_API_KEY') or '').strip()
+    dim_hint = (ENV.get('EMBED_DIM') or '').strip()
+    if not base and (ENV.get('ZHIPU_API_KEY') or '').strip():
+        base = (ENV.get('ZHIPU_BASE_URL') or 'https://open.bigmodel.cn/api/paas/v4').strip().rstrip('/')
+        model = model or (ENV.get('ZHIPU_EMBED_MODEL') or 'embedding-3').strip()
+        key = key or (ENV.get('ZHIPU_API_KEY') or '').strip()
+        dim_hint = dim_hint or (ENV.get('ZHIPU_EMBED_DIM') or '').strip()
+
+    has_base, has_model = bool(base), bool(model)
+    provider = None
+    if raw == 'off':
+        reason = 'off'
+    elif raw == 'http':
+        if has_base and has_model:
+            provider = 'http'
+        else:
+            reason = 'missing_http'
+    elif raw == 'builtin':
+        if _fastembed_available():
+            provider = 'builtin'
+        else:
+            reason = 'fastembed_missing'
+    else:  # auto
+        if has_base and has_model:
+            provider = 'http'
+        elif has_base or has_model:
+            # 半配置：不猜测、不静默掉到内置模型
+            reason = 'missing_http'
+        elif _fastembed_available():
+            provider = 'builtin'
+        else:
+            reason = 'fastembed_missing'
+
+    if provider == 'builtin' and not model:
+        model = BUILTIN_EMBED_DEFAULT_MODEL
+
+    return {
+        'enabled': provider is not None,
+        'provider': provider,
+        'base': base,
+        'model': model,
+        'key': key,
+        'dim_hint': int(dim_hint) if dim_hint.isdigit() and int(dim_hint) > 0 else None,
+        'reason': '' if provider else reason,
+    }
+
+
+def embed_unavailable_hint(settings=None) -> str:
+    cfg = settings or embed_settings()
+    return EMBED_REASON_HINTS.get(cfg.get('reason') or '', '语义层不可用')
+
+
+def embedding_enabled() -> bool:
+    return embed_settings()['enabled']
+
+
+def llm_enabled() -> bool:
+    """LLM 层（摘要/精排）可用性单一闸门：有 key 且未被显式 lite 关掉。
+
+    未写 HARNESS_MODE 的旧仓库（有 key）视为启用，避免既有安装静默失去精排。
+    """
+    if not (ENV.get('DEEPSEEK_API_KEY') or '').strip():
+        return False
+    mode = (ENV.get('HARNESS_MODE') or '').strip().lower()
+    return mode != 'lite'
+
+
+def embed_chunk_defaults() -> tuple:
+    """(字符数, 重叠) 默认值：内置模型 450/50，HTTP 端点 3000/300。"""
+    return BUILTIN_CHUNK_DEFAULT if embed_settings()['provider'] == 'builtin' else HTTP_CHUNK_DEFAULT
+
+
+class HttpEmbeddingsClient:
+    """OpenAI 兼容 /embeddings 客户端——本地与云端同一份代码。
+
+    覆盖 Ollama（`http://127.0.0.1:11434/v1`）、vLLM、LM Studio、智谱、
+    OpenAI、各类兼容网关。维度以首次响应实测为准，不依赖 .env 里的声明。
+    """
+
+    provider = 'http'
+
+    def __init__(self, settings=None, batch_size=32):
+        cfg = settings or embed_settings()
+        if not cfg['enabled']:
+            raise RuntimeError(
+                "语义层未启用：请在 .env 配置 EMBED_BASE_URL + EMBED_MODEL，"
+                "或安装 fastembed 使用内置模型")
+        self.base, self.model, self.key = cfg['base'], cfg['model'], cfg['key']
+        self.dim_hint = cfg['dim_hint']
+        self.batch_size = int(ENV.get('EMBED_BATCH') or batch_size)
+        self.rate_ms = int(ENV.get('API_RATE_LIMIT_MS') or 200)
+        self.dim = None
+
+    def _headers(self) -> dict:
+        h = {'Content-Type': 'application/json'}
+        if self.key:
+            h['Authorization'] = f'Bearer {self.key}'
+        return h
+
+    def _post(self, texts: list) -> list:
         _global_rate_limit(self.rate_ms)
-        return requests.post(
-            f"{self.base}/embeddings",
-            headers={
-                "Authorization": f"Bearer {self.key}",
-                "Content-Type": "application/json",
-            },
-            json={"model": self.model, "input": batch, "dimensions": self.dim},
-            timeout=60,
-        )
+        payload = {'model': self.model, 'input': texts}
+        if self.dim_hint:
+            payload['dimensions'] = self.dim_hint
+        r = requests.post(f'{self.base}/embeddings', headers=self._headers(),
+                          json=payload, timeout=120)
+        if r.status_code == 404:
+            raise RuntimeError(
+                f"{self.base}/embeddings 返回 404：请确认 base_url 指向 OpenAI 兼容根"
+                f"（Ollama 用 http://127.0.0.1:11434/v1）")
+        r.raise_for_status()
+        data = r.json()['data']
+        if data and isinstance(data[0], dict) and 'index' in data[0]:
+            data = sorted(data, key=lambda d: d['index'])
+        return [d['embedding'] for d in data]
 
-    def _embed_one(self, text: str):
-        """单条嵌入。成功返回 vec，400/其它失败返回 None（含日志）。"""
-        for attempt in range(2):
-            try:
-                r = self._post_embed([text])
-                if r.status_code == 400:
-                    body = r.text[:150].replace('\n', ' ')
-                    print(f"        ✗ 跳过 chunk (len={len(text)}): 400 {body}")
-                    return None
-                r.raise_for_status()
-                return r.json()['data'][0]['embedding']
-            except requests.exceptions.RequestException as e:
-                if attempt == 1:
-                    print(f"        ✗ 跳过 chunk (len={len(text)}): {e}")
-                    return None
-                time.sleep(2 ** attempt)
-        return None
+    def probe(self) -> int:
+        """探针：验证端点可用并锁定真实维度。写库前调用，失败即抛错。"""
+        vecs = self._post(['probe'])
+        if not vecs:
+            raise RuntimeError('探针返回空结果')
+        self.dim = len(vecs[0])
+        return self.dim
 
     def embed_batch(self, texts: list) -> list:
         """批量嵌入。返回同长度列表；失败项为 None，调用方应过滤。"""
+        if not texts:
+            return []
         results = []
-        for i in range(0, len(texts), 64):
-            batch = texts[i:i + 64]
-            ok = False
-            for attempt in range(3):
-                try:
-                    r = self._post_embed(batch)
-                    if r.status_code == 400:
-                        break  # 直接进入逐条降级
-                    r.raise_for_status()
-                    data = r.json()['data']
-                    results.extend([d['embedding'] for d in data])
-                    ok = True
-                    break
-                except requests.exceptions.RequestException as e:
-                    if attempt == 2:
-                        print(f"      ✗ batch 失败，降级逐条: {e}")
-                        break
-                    time.sleep(2 ** attempt)
-            if not ok:
-                print(f"      ↓ batch 400 或全重试失败，逐条重试 {len(batch)} 条")
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            try:
+                vecs = self._post(batch)
+                if len(vecs) != len(batch):
+                    raise RuntimeError(f'返回条数不符：请求 {len(batch)} 实得 {len(vecs)}')
+                results.extend(vecs)
+            except Exception as e:
+                print(f"      ✗ batch 失败，降级逐条: {e}")
                 for text in batch:
-                    results.append(self._embed_one(text))
+                    try:
+                        results.extend(self._post([text]))
+                    except Exception as e1:
+                        print(f"      ✗ 跳过 chunk (len={len(text)}): {e1}")
+                        results.append(None)
         return results
+
+
+class BuiltinEmbeddingsClient:
+    """内置本地模型（fastembed + onnxruntime）：没有可用的 HTTP 端点时的降级解。
+
+    零 API key、装完即离线可用；首次运行从 HuggingFace 拉模型（可用 HF_ENDPOINT
+    指向镜像），缓存在 EMBED_CACHE_DIR（默认 ~/.cache/fastembed）。
+    """
+
+    provider = 'builtin'
+
+    def __init__(self, settings=None, batch_size=32):
+        cfg = settings or embed_settings()
+        if not cfg['enabled']:
+            raise RuntimeError("语义层未启用：请配置 EMBED_BASE_URL/EMBED_MODEL 或安装 fastembed")
+        self.model = cfg['model'] or BUILTIN_EMBED_DEFAULT_MODEL
+        self.batch_size = int(ENV.get('EMBED_BATCH') or batch_size)
+        self.rate_ms = 0
+        self.dim = None
+        try:
+            from fastembed import TextEmbedding
+        except ImportError:
+            raise RuntimeError("内置嵌入需要 fastembed：pip install fastembed")
+        cache_dir = (ENV.get('EMBED_CACHE_DIR')
+                     or str(Path.home() / '.cache' / 'fastembed'))
+        try:
+            self._embedder = TextEmbedding(model_name=self.model, cache_dir=cache_dir)
+        except Exception as e:
+            raise RuntimeError(f"内置模型 {self.model} 加载失败：{e}")
+
+    def probe(self) -> int:
+        vecs = self.embed_batch(['probe'])
+        if not vecs or vecs[0] is None:
+            raise RuntimeError('内置模型探针失败')
+        self.dim = len(vecs[0])
+        return self.dim
+
+    def embed_batch(self, texts: list) -> list:
+        if not texts:
+            return []
+        # fastembed 不接受空串，用单空格占位（只出现在极短文件）
+        prepared = [t if t.strip() else ' ' for t in texts]
+        try:
+            return [v.tolist() for v in
+                    self._embedder.embed(prepared, batch_size=self.batch_size)]
+        except Exception as e:
+            print(f"      ✗ 内置模型批量推理失败，降级逐条: {e}")
+        results = []
+        for text in prepared:
+            try:
+                results.append(next(iter(self._embedder.embed([text]))).tolist())
+            except Exception as e:
+                print(f"      ✗ 跳过 chunk (len={len(text)}): {e}")
+                results.append(None)
+        return results
+
+
+def get_embeddings_client(settings=None):
+    """按配置返回客户端：HTTP 端点优先，其次内置模型（fastembed）。"""
+    cfg = settings or embed_settings()
+    if not cfg['enabled']:
+        raise RuntimeError("语义层未启用（EMBED_PROVIDER=off 或无可用的嵌入来源）")
+    if cfg['provider'] == 'builtin':
+        return BuiltinEmbeddingsClient(cfg)
+    return HttpEmbeddingsClient(cfg)
 
 
 # ─── Git 包装 ──────────────────────────────────────────────────────────────

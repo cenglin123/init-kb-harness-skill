@@ -6,15 +6,21 @@ maintain.py — init-kb-harness 维护主入口（完整管线）
 编排（批量任务默认并行）：
     提交用户改动 → detect_renames → check_sidecar_sources --fix
     → extract_office（office 文档 sidecar 提取，内部 ThreadPool 并发）
-    → [完整版] embed ∥ summarize（双进程并行；各自内部再按 MAINTAIN_CONCURRENCY 并发 API）
+    → 语义层 embed（必需）+ [LLM 层] summarize（两者都开时双进程并行）
     → build_index → build_graph → bm25_index --build → knowledge_map
     → health_report → [--semantic-lint] semantic_lint → memory_index → dream
     → file-dates / workflow frequency / CHANGELOG → 提交 Agent 产物
 
 安装模式（.env:HARNESS_MODE，默认 lite）：
-    lite（简化版）——跳过 embed/summarize 等 LLM 步骤；检索靠 BM25 本地索引 +
-        图谱/反链 + agent 自身 agentic grep/glob。零 API、零嵌入库。
-    full（完整版）——额外跑 embed ∥ summarize，提供语义检索 / 查重 / rerank / deep。
+    lite（默认）——不跑 summarize；检索 = 语义层（内置本地模型）+ BM25 +
+        图谱/反链 + agent 自身 agentic grep/glob。
+    full——额外跑 summarize，提供摘要/tag/合成/rerank/deep。
+
+可选能力（默认全关，装完即零 API、零额外依赖）：
+    语义层  .env 配置 EMBED_BASE_URL + EMBED_MODEL 即启用（任意 OpenAI 兼容
+            /embeddings 端点：本地 Ollama / vLLM / LM Studio，或云端）。
+            与 HARNESS_MODE 无关，lite 下也可单独启用。
+    LLM 层  HARNESS_MODE=full + DEEPSEEK_API_KEY：摘要 / tag / 语义精排。
 
 用法:
     python .meta/scripts/maintain.py                  # 增量
@@ -35,13 +41,37 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run,
-    refresh_large_file_report,
+    refresh_large_file_report, embedding_enabled, embed_settings,
+    embed_unavailable_hint, llm_enabled,
 )
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
-# 安装模式：lite（简化版，默认，零 API）/ full（完整版，含 embed + summarize）
-# 未显式配置时按 legacy 兼容推断：已有嵌入库的仓库按完整版运行，否则简化版
+
+def _legacy_mode() -> str:
+    """未显式配置 HARNESS_MODE 时的推断。
+
+    只有"旧仓库"（嵌入库存在但 **没有** embed_meta 记录）才推 full——那时 full
+    确实意味着带嵌入。新式仓库里 embeddings.sqlite 是语义层的产物，不能反推 LLM 层。
+    """
+    db = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
+    if not db.exists():
+        return 'lite'
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(db))
+        try:
+            has_meta = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='embed_meta'"
+            ).fetchone() is not None and con.execute(
+                "SELECT 1 FROM embed_meta LIMIT 1").fetchone() is not None
+        finally:
+            con.close()
+        return 'lite' if has_meta else 'full'
+    except Exception:
+        return 'lite'
+
+
 _mode_env = ENV.get('HARNESS_MODE', '').strip().lower()
 if _mode_env in ('lite', 'full'):
     HARNESS_MODE = _mode_env
@@ -49,7 +79,11 @@ else:
     if _mode_env:
         print(f"⚠️  无法识别的 HARNESS_MODE='{ENV.get('HARNESS_MODE')}'（应为 lite|full），"
               f"按 legacy 规则推断模式", file=sys.stderr)
-    HARNESS_MODE = 'full' if (VAULT_ROOT / '.meta' / 'embeddings.sqlite').exists() else 'lite'
+    HARNESS_MODE = _legacy_mode()
+
+# 语义层是基础能力（看 embed_settings），LLM 层是可选增强（key + 未被 lite 关掉）
+SEMANTIC_ENABLED = embedding_enabled()
+SUMMARIZE_ENABLED = llm_enabled()
 
 # Windows 下隐藏子进程窗口
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -70,6 +104,13 @@ def summarize_command_output(output: str) -> list:
             count = int(m.group(1))
             if count > 0:
                 bullets.append(f"更新 {count} 篇笔记的 embedding")
+            continue
+
+        m = re.search(r'✓ 完成 \.meta/links/（(\d+) 篇', stripped)
+        if m:
+            count = int(m.group(1))
+            if count > 0:
+                bullets.append(f"重建 {count} 篇笔记的语义关联")
             continue
 
         m = re.search(r'office 提取完成：(\d+) 提取', stripped)
@@ -134,7 +175,7 @@ def summarize_command_output(output: str) -> list:
 
 def build_changelog_bullets(full, outputs):
     bullets = []
-    for key in ('rename', 'office', 'embed', 'summarize', 'index', 'knowledge_map', 'health'):
+    for key in ('rename', 'office', 'embed', 'links', 'summarize', 'index', 'knowledge_map', 'health'):
         bullets.extend(summarize_command_output(outputs.get(key, '')))
 
     if full:
@@ -199,7 +240,7 @@ def generate_file_dates(git_ok):
             paths = [row[0] for row in conn.execute("SELECT DISTINCT path FROM embeddings")]
             conn.close()
         else:
-            # 简化版（lite）无嵌入库：直接扫描语料取路径
+            # 无嵌入库（显式 off / 未安装）：直接扫描语料取路径
             from common import scan_indexable_notes, rel_path
             paths = [rel_path(md) for md in scan_indexable_notes(scope='all')]
 
@@ -328,7 +369,8 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     log_script_run()
     start = datetime.now()
     print(f"=== 维护开始 @ {start.isoformat()} ===")
-    print(f"模式: {'全量 (--full)' if full else '增量'} · HARNESS_MODE={HARNESS_MODE}")
+    print(f"模式: {'全量 (--full)' if full else '增量'} · HARNESS_MODE={HARNESS_MODE}"
+          f" · 语义层={'on' if SEMANTIC_ENABLED else 'off'}")
 
     # 主从检测
     if not is_primary_host():
@@ -379,34 +421,46 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     if office_result.returncode != 0:
         print("  ⚠️  extract_office 失败（非致命，office 内容暂不可检索）")
 
-    # 4/6 · 嵌入 + 摘要（完整版；简化版跳过 LLM 步骤）
-    if HARNESS_MODE == 'full':
-        print("\n[4/6] 生成嵌入 + 摘要 / tag / 关联（并行）...")
-        embed_cmd = [sys.executable, str(SCRIPTS_DIR / 'embed.py')]
-        if full:
-            embed_cmd.append('--full')
-        embed_proc = subprocess.Popen(
-            embed_cmd, cwd=str(VAULT_ROOT),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding='utf-8', errors='replace',
-            creationflags=_NO_WINDOW,
-        )
+    # 4/6 · 语义层（基础，必需）+ 摘要（可选，需 LLM 层）
+    degraded = []
+    if SEMANTIC_ENABLED or SUMMARIZE_ENABLED:
+        label = []
+        if SEMANTIC_ENABLED:
+            label.append('生成嵌入')
+        if SUMMARIZE_ENABLED:
+            label.append('摘要 / tag')
+        print(f"\n[4/6] {' + '.join(label)}{'（并行）' if len(label) > 1 else ''} ...")
+        embed_proc = None
+        if SEMANTIC_ENABLED:
+            # --full 只重建本地派生件；重嵌入由 embed.py --full 单独表达（成本差异巨大）
+            embed_cmd = [sys.executable, str(SCRIPTS_DIR / 'embed.py')]
+            embed_proc = subprocess.Popen(
+                embed_cmd, cwd=str(VAULT_ROOT),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace',
+                creationflags=_NO_WINDOW,
+            )
 
-        summarize_result = run_script('summarize.py', full=full)
-        outputs['summarize'] = log_subprocess_result('summarize', summarize_result)
+        if SUMMARIZE_ENABLED:
+            summarize_result = run_script('summarize.py')
+            outputs['summarize'] = log_subprocess_result('summarize', summarize_result)
+        else:
+            summarize_result = None
 
-        embed_stdout, embed_stderr = embed_proc.communicate()
-        embed_text = (embed_stdout or '') + (embed_stderr or '')
-        if embed_text.strip():
-            print(embed_text, end='' if embed_text.endswith('\n') else '\n')
-        outputs['embed'] = embed_text
-        if embed_proc.returncode != 0:
-            print("  ✗ embed 失败，中止")
-            return 1
+        if embed_proc is not None:
+            embed_stdout, embed_stderr = embed_proc.communicate()
+            embed_text = (embed_stdout or '') + (embed_stderr or '')
+            if embed_text.strip():
+                print(embed_text, end='' if embed_text.endswith('\n') else '\n')
+            outputs['embed'] = embed_text
+            if embed_proc.returncode != 0:
+                # 语义层是基础能力，但失败不应拖垮 BM25/图谱/健康报告
+                print("  ⚠️  语义层本轮失败（旧向量仍可用）；继续重建其余索引")
+                degraded.append('语义层')
 
-        if summarize_result.returncode != 0:
-            print("  ✗ summarize 失败，中止")
-            return 1
+        if summarize_result is not None and summarize_result.returncode != 0:
+            print("  ⚠️  summarize 失败（摘要/tag 本轮未更新）；继续重建其余索引")
+            degraded.append('LLM 层')
 
         # 大文件闸门收尾（单写者：embed/summarize 已结束，此处重扫生成挂起清单）
         pending_large = refresh_large_file_report()
@@ -421,9 +475,22 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
             print("     4) 切分文件（agent 先提出切分建议，用户确认后执行）")
             print("     5) 删除文件（用户确认后执行）")
     else:
-        print(f"\n[4/6] 简化版模式（HARNESS_MODE={HARNESS_MODE}）：跳过 embed / summarize（LLM 步骤）。")
-        print("  检索走 BM25 本地索引 + 图谱/反链 + agent agentic grep/glob；")
-        print("  需要语义检索时在 .env 设 HARNESS_MODE=full 并配置 API key。")
+        cfg = embed_settings()
+        print("\n[4/6] 语义层未运行：", embed_unavailable_hint(cfg))
+        print("  检索暂时走 BM25 本地索引 + 图谱/反链 + agent agentic grep/glob。")
+        degraded.append('语义层')
+        if not SUMMARIZE_ENABLED:
+            print("  LLM 层（摘要/tag/精排）未启用：HARNESS_MODE=full + DEEPSEEK_API_KEY")
+        print("  语义层修复：pip install fastembed（内置模型），"
+              "或 .env 配 EMBED_BASE_URL + EMBED_MODEL（本地 Ollama / 云端）")
+
+    # 语义关联（.meta/links/）：纯余弦，属语义层，与 LLM 层无关
+    if SEMANTIC_ENABLED:
+        print("\n[+] 计算语义关联（纯余弦，无 LLM）...")
+        links_result = run_script('build_links.py', full=full)
+        outputs['links'] = log_subprocess_result('links', links_result)
+        if links_result.returncode != 0:
+            print("  ⚠️  build_links 失败（非致命，图谱 semantic 边可能滞后）")
 
     # 5/6 · 构建索引
     print("\n[5/6] 构建索引 ...")
@@ -527,13 +594,17 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
             print("  ✓ 无 Agent 产物变化")
 
     elapsed = (datetime.now() - start).total_seconds()
+    if degraded:
+        print(f"\n⚠️  本轮降级完成：{'、'.join(sorted(set(degraded)))} 未成功。"
+              f"其余索引已更新；修复后重跑维护即可补齐。")
     print(f"\n=== 维护完成，耗时 {elapsed:.1f}s ===")
     return 0
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='init-kb-harness 维护主入口')
-    parser.add_argument('--full', action='store_true', help='全量重置')
+    parser.add_argument('--full', action='store_true',
+                        help='全量重建本地派生件（索引/图谱/关联/健康/记忆），不强制重嵌入')
     parser.add_argument('--no-git', action='store_true', help='跳过 git 提交')
     parser.add_argument('--semantic-lint', action='store_true', help='附加语义 Lint (P0+P1)')
     parser.add_argument('--skip-changelog', action='store_true', help='跳过 CHANGELOG 读写')

@@ -77,6 +77,23 @@ SEMANTIC_LINE_RE = re.compile(
 
 # ─── 工具 ─────────────────────────────────────────────────────────────────────
 
+def _model_label() -> str:
+    """graph.json 的构建方式溯源：扫描器 + 实际输入里的语义关联来源。"""
+    label = 'wikilink-scan + mdlink-scan'
+    if LINKS_DIR.exists():
+        for f in LINKS_DIR.rglob('*.md'):
+            try:
+                for line in f.read_text(encoding='utf-8').splitlines()[:10]:
+                    if line.startswith('model:'):
+                        src = line.split(':', 1)[1].strip()
+                        if src:
+                            label += f' + {src}'
+                            return label
+            except Exception:
+                continue
+    return label
+
+
 def is_archived(path: str) -> bool:
     """路径任一目录段含 ARCHIVE_KEYWORDS 中任一标记 → 归档区。与 health_report.py 一致。"""
     parts = path.split('/')
@@ -661,7 +678,7 @@ def main():
     graph = {
         'schema_version': SCHEMA_VERSION,
         'generated_at': datetime.now().replace(microsecond=0).isoformat(),
-        'model': 'wikilink-scan + mdlink-scan + embedding-3 + deepseek-v4-flash',
+        'model': _model_label(),
         'config': {
             'semantic_threshold': SEMANTIC_THRESHOLD,
             'archive_keywords': list(ARCHIVE_KEYWORDS),
