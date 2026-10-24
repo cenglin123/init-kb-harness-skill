@@ -43,6 +43,7 @@ from common import (
     VAULT_ROOT, ENV, git, git_available, is_primary_host, log_script_run,
     refresh_large_file_report, embedding_enabled, embed_settings,
     embed_unavailable_hint, llm_enabled, resolve_mode,
+    ensure_derived_gitignore, git_last_dates,
 )
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -253,27 +254,23 @@ def generate_file_dates(git_ok):
     dates = {}
     if git_ok:
         db_path = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
+        paths = []
         if db_path.exists():
-            import sqlite3
-            conn = sqlite3.connect(str(db_path))
-            paths = [row[0] for row in conn.execute("SELECT DISTINCT path FROM embeddings")]
-            conn.close()
-        else:
-            # 无嵌入库（显式 off / 未安装）：直接扫描语料取路径
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(db_path))
+                try:
+                    paths = [row[0] for row in
+                             conn.execute("SELECT DISTINCT path FROM embeddings")]
+                finally:
+                    conn.close()
+            except Exception as e:
+                print(f"  ⚠️  读取嵌入库失败（{e}），file-dates 回退扫描语料")
+        if not paths:
+            # 无嵌入库 / 库不可读：直接扫描语料取路径
             from common import scan_indexable_notes, rel_path
             paths = [rel_path(md) for md in scan_indexable_notes(scope='all')]
-
-        for path in paths:
-            try:
-                result = subprocess.run(
-                    ['git', 'log', '-1', '--format=%at', '--', path],
-                    capture_output=True, text=True, cwd=str(VAULT_ROOT),
-                    timeout=5, creationflags=_NO_WINDOW,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    dates[path] = float(result.stdout.strip())
-            except Exception:
-                pass
+        dates = git_last_dates(paths)
 
     dates_path = VAULT_ROOT / '.meta' / 'file-dates.json'
     dates_path.write_text(json.dumps(dates, ensure_ascii=False), encoding='utf-8')
@@ -375,13 +372,17 @@ def _insert_changelog_entry_safe(changelog_path, start, full, bullets, skip_chan
         from changelog_append import insert_changelog_entry
     except ImportError:
         return False
-    return insert_changelog_entry(
-        changelog_path,
-        start.strftime('%Y-%m-%d %H:%M'),
-        'agent',
-        title,
-        bullets,
-    )
+    try:
+        return insert_changelog_entry(
+            changelog_path,
+            start.strftime('%Y-%m-%d %H:%M'),
+            'agent',
+            title,
+            bullets,
+        )
+    except Exception as e:
+        print(f"  ⚠️  CHANGELOG 写入失败（{e}），本轮跳过")
+        return False
 
 
 def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
@@ -404,6 +405,11 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     if not git_ok and not no_git:
         print(f"\n⚠️  未找到 Git 仓库。请先 git init，或使用 --no-git 跳过")
         return 1
+
+    # 可重建的向量/索引二进制不入库（否则每次维护都往 git 历史堆几十 MB）
+    if git_ok and not no_git:
+        if ensure_derived_gitignore():
+            print("  ✓ 已把 embeddings/bm25 派生件移出版本控制（工作区保留）")
 
     outputs = {}
 

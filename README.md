@@ -19,6 +19,15 @@
 
 ---
 
+## 派生件与版本控制
+
+可重建的二进制派生件不入库：`maintain.py` 会在目标仓库 `.gitignore` 维护一个受管块（`embeddings.sqlite` 含 `-wal/-shm`、`bm25_index.pkl.gz`、`bm25_doc_cache.pkl.gz`），并把这些文件从 git 索引移除（**工作区文件保留**，不删数据）。文本派生件（`file-dates.json` / `graph.json` / `.meta/links/` / manifest）继续入库。
+
+- 多机同步：这些二进制走网盘/rsync；从机是只读的，需要语义/BM25 检索时由主机重建后同步。
+- 首次生效会改变既有仓库的跟踪状态（`git rm --cached`），只影响索引，不动磁盘文件。
+
+---
+
 ## Installation
 
 Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 + taxonomy 推断 + 交互式引导）由技能触发，不是手动安装步骤。

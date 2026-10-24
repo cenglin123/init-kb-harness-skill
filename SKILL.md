@@ -344,6 +344,7 @@ target-vault/
 8. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
 9. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
 10. **宿主护栏边界**：Phase 1.5 的护栏只拦机械路径规则（隐私目录、从机禁改清单、编辑重定向），不拦判断类规则（如检索策略选择）；它是状态侧（pre-commit）的加固层而非替代，软规则原文保留；各宿主 fail-open/fail-closed 行为以 `host_guard.py` docstring 与接线文件注释为准，不宣称为安全边界。
+11. **派生件与版本控制**：可重建的二进制派生件——`embeddings.sqlite`（含 `-wal/-shm`）、`bm25_index.pkl.gz`、`bm25_doc_cache.pkl.gz`——由 `maintain.py` 自动写入 `.gitignore` 受管块并从 git 索引移除（工作区文件保留），避免每轮维护把几十 MB 二进制堆进历史。`file-dates.json` / 图谱 / links / manifest 等文本派生件仍入库。多机同步走网盘/rsync；从机只读且需要检索时，由主机重建后再同步。
 
 ---
 

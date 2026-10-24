@@ -861,6 +861,85 @@ def git_available() -> bool:
     r = git('rev-parse', '--git-dir', check=False)
     return r.returncode == 0
 
+
+# ─── 派生件与 git：可重建的二进制不入库 ─────────────────────────────────────
+GITIGNORE_BEGIN = '# --- init-kb-harness: derived artifacts (managed) ---'
+GITIGNORE_END = '# --- /init-kb-harness ---'
+DERIVED_GIT_PATHS = (
+    '.meta/embeddings.sqlite',
+    '.meta/embeddings.sqlite-wal',
+    '.meta/embeddings.sqlite-shm',
+    '.meta/bm25_index.pkl.gz',
+    '.meta/bm25_doc_cache.pkl.gz',
+)
+
+
+def ensure_derived_gitignore() -> bool:
+    """把可重建的向量/索引二进制写进 .gitignore，并从索引移除（工作区文件保留）。
+
+    幂等：受管块按标记更新；未跟踪时不产生 diff。返回是否发生改动。
+    """
+    gi = VAULT_ROOT / '.gitignore'
+    try:
+        text = gi.read_text(encoding='utf-8') if gi.exists() else ''
+    except Exception:
+        text = ''
+    block = '\n'.join([GITIGNORE_BEGIN, *DERIVED_GIT_PATHS, GITIGNORE_END]) + '\n'
+    changed = False
+    if GITIGNORE_BEGIN in text and GITIGNORE_END in text:
+        start = text.index(GITIGNORE_BEGIN)
+        end = text.index(GITIGNORE_END) + len(GITIGNORE_END)
+        new_text = text[:start] + block.rstrip('\n') + text[end:]
+    else:
+        new_text = (text.rstrip('\n') + '\n\n' if text.strip() else '') + block
+    if new_text != text:
+        gi.write_text(new_text, encoding='utf-8', newline='')
+        changed = True
+
+    tracked = git('ls-files', '--', *DERIVED_GIT_PATHS, check=False).stdout.strip()
+    if tracked:
+        git('rm', '--cached', '-q', '--ignore-unmatch', *DERIVED_GIT_PATHS, check=False)
+        changed = True
+    if changed:
+        git('add', '.gitignore', check=False)
+    return changed
+
+
+def git_last_dates(paths) -> dict:
+    """一次 git log 扫描，返回 {rel_path: 最近一次提交的 unix 时间}。
+
+    比逐文件 `git log -1 -- path` 快一个量级（5k 文件从数分钟降到一次遍历）。
+    """
+    want = {p.replace('\\', '/') for p in paths}
+    if not want:
+        return {}
+    env = os.environ.copy()
+    env['GIT_PAGER'] = 'cat'
+    try:
+        r = subprocess.run(
+            ['git', '-c', 'core.quotepath=false', 'log',
+             '--pretty=format:\x01%at', '--name-only'],
+            cwd=str(VAULT_ROOT), capture_output=True, text=True,
+            encoding='utf-8', errors='replace', env=env,
+        )
+    except Exception:
+        return {}
+    if r.returncode != 0:
+        return {}
+    out = {}
+    ts = None
+    for line in r.stdout.splitlines():
+        if line.startswith('\x01'):
+            try:
+                ts = float(line[1:].strip())
+            except ValueError:
+                ts = None
+        elif line.strip() and ts is not None:
+            p = line.strip().replace('\\', '/')
+            if p in want and p not in out:   # 倒序输出，首次出现即最近一次
+                out[p] = ts
+    return out
+
 def is_primary_host() -> bool:
     primary = ENV.get('PRIMARY_HOST', '').strip()
     if not primary:
