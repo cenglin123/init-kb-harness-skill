@@ -42,18 +42,18 @@ Vault/
 ### 三条元原则
 - **I · Occam** — 如无必要，勿增实体
 - **II · Separation of Authorship** — 谁写的谁看（用户原文 vs Agent 的 `.meta/`，两类产物永不混入）。Agent 产物必带 `agent` / `model` / `generated_at`；技术类笔记加 `applies`（universal / agent-bound / mixed）
-- **III · Bitter Lesson** — 通用方法优于硬编码先验；完整版优先 embedding / LLM / 语义检索，简化版优先 agentic 检索（agent 自身就是通用方法）
+- **III · Bitter Lesson** — 通用方法优于硬编码先验；语义层/LLM 层启用时优先 embedding 与语义检索，未启用时 agentic 检索（agent 自身就是通用方法）
 
-### 检索方法默认（按安装模式分档）
+### 检索方法默认
 
-**简化版（`.env:HARNESS_MODE=lite`，默认）——你是检索主力**：寻找仓库内容默认由你做 **agentic 检索**：按 `docs/TAXONOMY.md` 的文件夹分类导航定位候选目录 → Glob 圈定文件 → Grep 关键词/同义词多轮收敛。辅助手段：`python .meta/scripts/ask.py "query"`（自动降级为 BM25 本地检索）、`ask.py --backlinks/--neighbors/--path`（图谱遍历）、`.index/manifest.md` 分类清单。LLM 总结/语义精排类工作（写前查重的语义层、主题综述）由你直接读文兼任。
+**语义层默认开启**（内置本地模型，零 API）：寻找仓库内容默认调用 `python .meta/scripts/ask.py "query"`（向量检索；低置信时自动升级 hybrid）。Grep/Glob 用于已知精确字符串、路径定位、frontmatter 字段等结构性匹配，以及语义层明确报告不可用时的兜底。
 
-**完整版（存在 `.meta/embeddings.sqlite`）**：任何寻找仓库内容的步骤默认调用 `python .meta/scripts/ask.py "query"`（语义检索；低置信时自动升级 hybrid/deep/rerank，无需手动决定），Grep 仅用于已知精确字符串/路径定位、frontmatter 字段等结构性匹配。
+辅助手段：`ask.py --backlinks/--neighbors/--path`（图谱遍历）、`.index/manifest.md` 分类清单、`docs/TAXONOMY.md` 目录导航。`--hybrid` 只需语义层；`--deep/--rerank` 需要 LLM 层（`HARNESS_MODE=full` + key），未启用时不要调用。语义层报「不可用」时按它给的提示处理（重建 / 装依赖 / 修端点），不要把它当成"没有相关内容"。
 
 ### 任务执行前必须先检索记忆系统
 接到任何任务后、动手执行前，**必须先检索记忆系统查看可能的过往经验**：
 1. 读 `.meta/memory/MEMORY.md` 索引，看当前有哪些记忆条目
-2. 有相关条目则读取对应文件；不确定时跑 `python .meta/scripts/ask.py --scope memory "<任务关键词>"`（简化版自动走 BM25，覆盖 memory 语料）或 Grep `.meta/memory/`
+2. 有相关条目则读取对应文件；不确定时跑 `python .meta/scripts/ask.py --scope memory "<任务关键词>"`（默认走语义检索，覆盖 memory 语料；语义层不可用时自动回 BM25）或 Grep `.meta/memory/`
 
 唯一豁免：用户当次明确说"不用查记忆/直接做"。否则此步不可跳过——重复踩已沉淀过的坑是记忆系统存在的反例。
 
@@ -65,10 +65,10 @@ Vault/
 > 记忆只存 agent 专属物。知识库内容（流程/项目/参考）由用户笔记目录承担，不重复存入记忆系统。
 
 ### 批量任务必须并行
-维护管线的批量环节（embed / summarize / office 提取）已内置并发（`.env:MAINTAIN_CONCURRENCY`）。**你手工做批量维护（批量整理、迁移、打标、改写多个文件）时同样必须并行**：能并行派 subagent 的并行派发，能在一次响应里并行发多个工具调用的并行发——禁止逐文件串行循环。
+维护管线的批量环节已内置并发（`.env:MAINTAIN_CONCURRENCY`）：嵌入按来源走线程池/扁平批量，office 提取是子进程并行且单文件超时即跳过（`OFFICE_EXTRACT_TIMEOUT_S`）。**你手工做批量维护（批量整理、迁移、打标、改写多个文件）时同样必须并行**：能并行派 subagent 的并行派发，能在一次响应里并行发多个工具调用的并行发——禁止逐文件串行循环。
 
 ### 大文件挂起处置（硬约束：维护完成后必须询问用户）
-完整版维护中，超过 `.env:LARGE_FILE_THRESHOLD_MB`（默认 1MB）的单文件会被脚本**硬性挡在嵌入/LLM 管线外**并登记到 `.meta/large-files-pending.md`（BM25/图谱/索引不受影响）。**维护完成后若该清单非空，你必须逐个向用户询问处理方式**，推荐选项：
+维护中，超过 `.env:LARGE_FILE_THRESHOLD_MB`（默认 1MB）的单文件会被脚本**硬性挡在嵌入/LLM 管线外**并登记到 `.meta/large-files-pending.md`（BM25/图谱/索引不受影响）。**维护完成后若该清单非空，你必须逐个向用户询问处理方式**，推荐选项：
 1. 全套正常处理（嵌入/LLM + BM25 + 图谱 + 关键词）→ 决定写 `allow`
 2. 仅排除嵌入/LLM，其余照做 → 决定写 `llm_skip`
 3. 本次跳过该文件 → 决定写 `skip`
@@ -109,7 +109,7 @@ Vault/
 |----------|---------|------|
 | "维护" / "更新索引" | 增量索引 | `python .meta/scripts/maintain.py` |
 | "全量重建" / 首次运行 | 全量索引 | `python .meta/scripts/maintain.py --full` |
-| "我写过 X 吗？" / "搜索" | 查询 | `python .meta/scripts/ask.py "query"`（简化版自动 BM25；复杂主题改 agentic grep/glob 多轮收敛） |
+| "我写过 X 吗？" / "搜索" | 查询 | `python .meta/scripts/ask.py "query"`（默认语义检索；复杂主题可改 agentic grep/glob 多轮收敛） |
 | "帮我起草 X" | 新建笔记 | 按用户要求写；技术类笔记（复盘/工作流）frontmatter 登记 `agent` / `model` / `generated_at` / `applies`（universal=环境无关 / agent-bound=依赖特定宿主框架 / mixed=部分绑定），非技术类可省 |
 | "评议" / "收敛" / "converge" | 执行前收敛 | 按 `.meta/converge/README.md` 走 converge SKILL |
 | "审计" / "复审" | 执行后验收 | 回到对应 active plan 的 review，由 fresh verifier 验收 |
@@ -117,7 +117,7 @@ Vault/
 ### 第 2 步 · 执行前自检
 - [ ] 我是否已检索记忆系统（MEMORY.md / ask.py --scope memory）？除非用户明确豁免 → **先查再动手**
 - [ ] 我是否准备写入用户原文？如果是且用户没明确要求 → **停止**
-- [ ] 我是否准备用 Grep 找内容？简化版：Grep/Glob 就是主力，但先按文件夹分类导航收敛范围；完整版：如果不是精确字符串 → **改用 ask.py**
+- [ ] 我是否准备用 Grep 找内容？精确字符串/路径/frontmatter 才用 Grep；其余 **优先 ask.py**（语义层默认开启），语义层报告不可用时再退回 Grep/Glob + 文件夹导航
 - [ ] 我是否准备逐文件串行处理一批文件？→ **改并行**（subagent / 并行工具调用）
 - [ ] 我是否准备新建纯 agent 创作的笔记？→ 运行 `whoami.py --frontmatter` 取溯源字段（agent/model/generated_at）；技术类笔记自评 `applies`（框架绑定的结论标 agent-bound 或 mixed，正文就地标注）
 - [ ] 我是否准备改治理文档（`.meta/governed-files.txt` 命中）？→ 走 ultraverge
@@ -127,10 +127,10 @@ Vault/
 ## 常用脚本
 
 ```bash
-python .meta/scripts/maintain.py                # 增量维护（全管线；简化版自动跳过 LLM 步骤）
-python .meta/scripts/maintain.py --full         # 全量重建
-python .meta/scripts/ask.py "query"             # 检索（简化版自动降级 BM25；完整版为语义检索+低置信自动升级）
-python .meta/scripts/ask.py --bm25 "query"      # 显式 BM25 本地检索（两种模式均可用）
+python .meta/scripts/maintain.py                # 增量维护（嵌入 + 基础索引；LLM 层未启用时跳过摘要）
+python .meta/scripts/maintain.py --full         # 全量重建本地派生件（不强制重嵌入）
+python .meta/scripts/ask.py "query"             # 语义检索（不可用时自动回 BM25；低置信自动升级 hybrid）
+python .meta/scripts/ask.py --bm25 "query"      # 显式 BM25 本地检索
 python .meta/scripts/ask.py --check "主题"      # 写前查重
 python .meta/scripts/ask.py --orphans           # 孤儿清单
 python .meta/scripts/ask.py --scope memory "query"  # 记忆系统检索
@@ -140,13 +140,13 @@ python .meta/scripts/check_all.py --quiet       # 完工机械检查
 python .meta/scripts/changelog.py titles --limit 5  # CHANGELOG 局部读取
 python .meta/scripts/whoami.py                  # 模型自检
 python .meta/scripts/whoami.py --frontmatter    # 溯源 YAML（agent/model/generated_at；WHOAMI_AGENT env 可显式指定宿主）
-# 以下仅完整版（HARNESS_MODE=full 且已配 API key）：
+# 以下需要 LLM 层（HARNESS_MODE=full 且已配 DEEPSEEK_API_KEY）：
 python .meta/scripts/ask.py --hybrid "query"    # BM25+Dense 混合检索
 python .meta/scripts/synthesize.py --theme "主题" --scope "glob"  # 主题合成
 python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾检测）
 ```
 
-模型配置见 `.env`；不得硬编码 key。简化版（`HARNESS_MODE=lite`，默认）零 API：检索主力是 agentic grep/glob + 文件夹导航，LLM 总结/综述由 agent 读文兼任。
+模型配置见 `.env`；不得硬编码 key。默认零 API：语义层用内置本地模型（fastembed + bge-small-zh），LLM 总结/综述默认由 agent 读文兼任；需要摘要/tag/精排时再开 `HARNESS_MODE=full` + key。
 
 ---
 
