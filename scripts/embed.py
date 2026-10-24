@@ -8,8 +8,9 @@ embed.py — 生成笔记嵌入并存入 .meta/embeddings.sqlite
     builtin 内置 fastembed 模型（bge-small-zh，兜底，零 API）
 
 并发策略（效率优先）：
-    http    跨文件线程池（MAINTAIN_CONCURRENCY），API 往返密集
-    builtin 按 64 篇一批做扁平批量推理——ONNX 内部已多线程，再叠 Python 线程只会抢核
+    http    把 chunk 切成 EMBED_BATCH 大小的请求批，线程池并发（MAINTAIN_CONCURRENCY）
+    builtin 按文件批 + chunk 上限做扁平批量推理——ONNX 内部已多线程，再叠 Python 线程只会抢核
+    两者都是**分批推理、立即写库**：内存只驻留单批，5k 规模不会囤几百 MB 向量
 
 安全策略（不做自动清库）：
     · 先探针验证来源，再碰数据库——来源不可用时库原样不动
@@ -239,28 +240,64 @@ def _collect_targets(db, table, full):
     return processed, targets, current_paths, unreadable
 
 
-def _embed_threaded(client, targets):
-    """HTTP：跨文件线程池。返回 {rel: (h, chunks, vecs)}。"""
-    def _one(item):
-        rel, h, content = item
+def _file_batches(targets):
+    """按文件数 + chunk 数切批，避免一次把整库向量留在内存里。"""
+    batch, nchunks = [], 0
+    for rel, h, content in targets:
         chunks = chunk_text(content)
-        return rel, h, chunks, client.embed_batch(chunks)
+        if batch and (len(batch) >= FILE_BATCH or nchunks + len(chunks) > CHUNK_BATCH):
+            yield batch
+            batch, nchunks = [], 0
+        batch.append((rel, h, chunks))
+        nchunks += len(chunks)
+    if batch:
+        yield batch
 
-    out = {}
-    with ThreadPoolExecutor(max_workers=MAINTAIN_CONCURRENCY) as pool:
-        futures = {pool.submit(_one, t): t[0] for t in targets}
-        for done, fut in enumerate(as_completed(futures), 1):
-            rel = futures[fut]
+
+def _embed_http_slices(client, texts):
+    """HTTP：把文本切成请求批并并发提交；返回与 texts 等长的向量列表。"""
+    if not texts:
+        return []
+    bs = max(1, client.batch_size)
+    slices = [texts[i:i + bs] for i in range(0, len(texts), bs)]
+    results = [None] * len(texts)
+    with ThreadPoolExecutor(max_workers=max(1, MAINTAIN_CONCURRENCY)) as pool:
+        futures = {pool.submit(client.embed_batch, sl): i for i, sl in enumerate(slices)}
+        for fut in as_completed(futures):
+            i = futures[fut]
             try:
-                rel, h, chunks, vecs = fut.result()
+                vecs = fut.result()
             except Exception as e:
-                print(f"  [{done}/{len(targets)}] ✗ {rel} embedding 失败: {e}")
-                out[rel] = (None, None, None)
-                continue
+                print(f"      ✗ batch {i} 失败: {e}")
+                vecs = [None] * len(slices[i])
+            start = i * bs
+            results[start:start + len(slices[i])] = vecs
+    return results
+
+
+def _embed_and_write(client, targets, db, table, processed):
+    """分批推理并**立即写库**：内存只驻留单批，返回 (插入篇数, 失败清单)。"""
+    inserted, failed = 0, []
+    total = len(targets)
+    done = 0
+    for batch in _file_batches(targets):
+        flat = [c for _, _, chunks in batch for c in chunks]
+        vecs = (_embed_http_slices(client, flat) if client.provider == 'http'
+                else client.embed_batch(flat))
+        it = iter(vecs)
+        for rel, h, chunks in batch:
+            file_vecs = [next(it, None) for _ in chunks]
+            store_h = h if all(v is not None for v in file_vecs) else (processed.get(rel) or '')
+            written = _write_file(db, table, rel, store_h, chunks, file_vecs, client.model)
+            done += 1
             tag = f"(分块 {len(chunks)})" if len(chunks) > 1 else ""
-            print(f"  [{done}/{len(targets)}] {rel} {tag}")
-            out[rel] = (h, chunks, vecs)
-    return out
+            if written < 0:
+                failed.append(rel)
+                print(f"  [{done}/{total}] ⚠  {rel} {tag}：有分块未成功，保留旧向量")
+            else:
+                inserted += 1
+                print(f"  [{done}/{total}] ✓ {rel} {tag}")
+    return inserted, failed
 
 
 def _write_skipped_report(rows: list):
@@ -279,30 +316,6 @@ def _write_skipped_report(rows: list):
     lines += [f'- `{rel}` — {msg}' for rel, msg in rows]
     SKIPPED_REPORT.parent.mkdir(parents=True, exist_ok=True)
     SKIPPED_REPORT.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-
-
-def _embed_batched(client, targets):
-    """builtin：按文件批 + chunk 上限做扁平批量推理（ONNX 内部多线程）。"""
-    out = {}
-    total = len(targets)
-    base = 0
-    while base < total:
-        batch, chunks_in_batch = [], 0
-        while base + len(batch) < total and len(batch) < FILE_BATCH:
-            rel, h, content = targets[base + len(batch)]
-            chunks = chunk_text(content)
-            if batch and chunks_in_batch + len(chunks) > CHUNK_BATCH:
-                break
-            batch.append((rel, h, chunks))
-            chunks_in_batch += len(chunks)
-        base += len(batch)
-        flat = [(rel, c) for rel, _, chunks in batch for c in chunks]
-        vecs = client.embed_batch([c for _, c in flat])
-        it = iter(vecs)
-        for rel, h, chunks in batch:
-            out[rel] = (h, chunks, [next(it, None) for _ in chunks])
-        print(f"  [{base}/{total}] 已嵌入 {len(batch)} 篇（{len(flat)} 块）")
-    return out
 
 
 def _activate(db, client, dim):
@@ -398,23 +411,8 @@ def main(full=False):
         print(f"  待嵌入: {len(targets)} 篇（{client.provider} · {client.model} · "
               f"{dim} 维 · {'并发 ' + str(MAINTAIN_CONCURRENCY) if client.provider == 'http' else '扁平批量'}）")
 
-        results = (_embed_batched if client.provider == 'builtin' else _embed_threaded)(client, targets)
-
-        inserted_files = 0
-        failed_files = []
-        for n, (rel, h, content) in enumerate(targets, 1):
-            h_res, chunks, vecs = results.get(rel, (None, None, None))
-            if h_res is None:
-                failed_files.append(rel)
-                continue
-            # 失败时保留旧 hash（下一轮重试），成功才落新 hash
-            store_h = h if not any(v is None for v in vecs) else (processed.get(rel) or '')
-            written = _write_file(db, table, rel, store_h, chunks, vecs, client.model)
-            if written < 0:
-                failed_files.append(rel)
-                print(f"  ⚠  {rel}: 有分块未成功，保留旧向量并下轮重试")
-            else:
-                inserted_files += 1
+        inserted_files, failed_files = _embed_and_write(
+            client, targets, db, table, processed)
 
         # --full 是"整套换代"：有任何一篇没写成功就不切换
         if inserted_files == 0 or (full and failed_files):

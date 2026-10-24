@@ -66,9 +66,7 @@ def load_env() -> dict:
 ENV = load_env()
 VAULT_ROOT = find_vault_root()
 
-# ─── 图与向量公共常量 ──────────────────────────────────────────────────────────
-# semantic 边保留阈值（build_graph 构造 + get_neighbors 遍历共享）；换嵌入模型后可校准
-SEMANTIC_THRESHOLD = float(ENV.get('SEMANTIC_THRESHOLD') or 0.75)
+# ─── 图与向量公共常量（SEMANTIC_THRESHOLD 在嵌入层之后定义，见下）──────────
 
 # ─── 排除规则 ──────────────────────────────────────────────────────────────
 def _load_privacy_dirs() -> set:
@@ -692,6 +690,21 @@ def embed_chunk_defaults() -> tuple:
     return BUILTIN_CHUNK_DEFAULT if embed_settings()['provider'] == 'builtin' else HTTP_CHUNK_DEFAULT
 
 
+def threshold_defaults() -> dict:
+    """相似度阈值初始值：bge-small-zh 与云端 embedding-3 的余弦分布不同。
+
+    内置模型取 0.58/0.72/0.62（实测相关对 0.64–0.78、不相关 ≤0.44 的中间带）；
+    HTTP 端点沿用 0.70/0.85/0.75。都可用 .env 覆盖，或跑 calibrate_thresholds.py 校准。
+    """
+    if embed_settings()['provider'] == 'builtin':
+        return {'links': 0.58, 'links_high': 0.72, 'graph': 0.62, 'escalation': 0.50}
+    return {'links': 0.70, 'links_high': 0.85, 'graph': 0.75, 'escalation': 0.60}
+
+
+# semantic 边保留阈值（build_graph 构造 + get_neighbors 遍历共享）
+SEMANTIC_THRESHOLD = float(ENV.get('SEMANTIC_THRESHOLD') or threshold_defaults()['graph'])
+
+
 class HttpEmbeddingsClient:
     """OpenAI 兼容 /embeddings 客户端——本地与云端同一份代码。
 
@@ -1178,7 +1191,7 @@ def resolve_wikilink(target: str, source_path: str,
     """复刻 Obsidian wikilink 解析算法。
     支持 [[target]]、[[target|alias]]、[[target#heading]]、[[../path/note]]。
     返回 (resolved_path, None) 成功，(None, reason) 失败。"""
-    t = target.strip()
+    t = unquote(target).strip()   # 还原 %23 等转义（'#' 会被当锚点）
     if not t:
         return None, 'empty target'
 

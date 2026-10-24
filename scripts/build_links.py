@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_notes, scan_office_extracts, content_hash, rel_path,
     meta_mirror, ensure_parent, find_all_wikilinks, find_all_mdlinks,
-    ENV, log_script_run,
+    ENV, threshold_defaults, log_script_run,
 )
 from embed import blob_to_embedding, read_meta
 
@@ -36,8 +36,9 @@ LINKS_DIR = VAULT_ROOT / '.meta' / 'links'
 TOP_K = 8
 # 关联阈值：这里的线写 links；build_graph 再用 SEMANTIC_THRESHOLD 收边。
 # 换嵌入模型后可用 .env 校准（生效条件：本脚本会因 model/阈值变化自动重建）。
-RELATED_THRESHOLD = float(ENV.get('LINKS_SIM_THRESHOLD') or 0.70)
-HIGH_TIER = float(ENV.get('LINKS_HIGH_THRESHOLD') or 0.85)
+_td = threshold_defaults()
+RELATED_THRESHOLD = float(ENV.get('LINKS_SIM_THRESHOLD') or _td['links'])
+HIGH_TIER = float(ENV.get('LINKS_HIGH_THRESHOLD') or _td['links_high'])
 
 
 def _stamp_params():
@@ -77,6 +78,11 @@ def extract_link_targets(content: str) -> list:
     return sorted(t for t in targets if t)
 
 
+def _link_target(rel: str) -> str:
+    """vault 相对路径（去 .md）；'#' 是 wikilink 锚点分隔符，转成 %23 由解析侧还原。"""
+    return Path(rel).with_suffix('').as_posix().replace('#', '%23')
+
+
 def write_links(rel, h, related, wikilinks, model):
     p = meta_mirror(VAULT_ROOT / rel, 'links')
     ensure_parent(p)
@@ -99,12 +105,12 @@ def write_links(rel, h, related, wikilinks, model):
     if high:
         lines.append(f"## 高度相关（sim ≥ {HIGH_TIER:.2f}）")
         for r, s in high:
-            lines.append(f"- [[{Path(r).with_suffix('').as_posix()}|{Path(r).stem}]] — sim {s:.2f}")
+            lines.append(f"- [[{_link_target(r)}|{Path(r).stem}]] — sim {s:.2f}")
         lines.append("")
     if mid:
         lines.append(f"## 中度相关（{RELATED_THRESHOLD:.2f}–{HIGH_TIER:.2f}）")
         for r, s in mid:
-            lines.append(f"- [[{Path(r).with_suffix('').as_posix()}|{Path(r).stem}]] — sim {s:.2f}")
+            lines.append(f"- [[{_link_target(r)}|{Path(r).stem}]] — sim {s:.2f}")
         lines.append("")
     if not high and not mid:
         lines.append("## 相关笔记")

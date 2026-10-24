@@ -286,20 +286,22 @@ class SemanticLayerTests(unittest.TestCase):
         before = self.rows()
         before_meta = self.meta()
 
+        # 新增一篇"整篇都会失败"的笔记：其余篇成功也不能换表
+        (self.notes / 'c-fail.md').write_text(
+            '# FAILME\n\n## x\nFAILME 内容', encoding='utf-8')
+        self.server.fail_texts = ('FAILME',)
         self.server.dim = 4
-        self.server.fail_after = self.server.calls + 2  # 探针 + 第一篇成功，第二篇起失败
         result = self.run_script('embed.py', '--full')
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn('未写入成功', result.stdout)
         self.assertEqual(self.rows(), before)
         self.assertEqual(self.meta(), before_meta)
         con = sqlite3.connect(str(self.db_path))
         try:
-            staging = con.execute(
-                "SELECT name FROM sqlite_master WHERE name='embeddings_staging'").fetchone()
+            self.assertIsNone(con.execute(
+                "SELECT name FROM sqlite_master WHERE name='embeddings_staging'").fetchone())
         finally:
             con.close()
-        self.assertIsNone(staging)
 
     def test_ask_falls_back_to_bm25_when_disabled(self):
         self.write_env(enabled=False)
@@ -370,6 +372,48 @@ class SemanticLayerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('仅列出', result.stdout)
         self.assertNotIn('[LLM]', result.stdout)
+
+    def test_threshold_defaults_follow_provider(self):
+        (self.vault / '.env').write_text('EMBED_PROVIDER=builtin\n', encoding='utf-8')
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "from common import threshold_defaults;"
+                "print(threshold_defaults()['links'])" % self.scripts)
+        builtin = self.subprocess_py(code)
+        self.assertEqual(builtin.returncode, 0, builtin.stderr)
+        self.assertIn('0.58', builtin.stdout)
+
+        (self.vault / '.env').write_text(
+            f'EMBED_PROVIDER=http\nEMBED_BASE_URL={self.server.base_url}\n'
+            'EMBED_MODEL=fake-embed\n', encoding='utf-8')
+        http = self.subprocess_py(code)
+        self.assertEqual(http.returncode, 0, http.stderr)
+        self.assertIn('0.7', http.stdout)
+
+    def test_calibrate_thresholds_outputs_suggestions(self):
+        (self.notes / 'a').mkdir(exist_ok=True)
+        (self.notes / 'b').mkdir(exist_ok=True)
+        (self.notes / 'a' / 'x.md').write_text('# X\n\n## s\n甲', encoding='utf-8')
+        (self.notes / 'b' / 'y.md').write_text('# Y\n\n## s\n乙', encoding='utf-8')
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        result = self.run_script('calibrate_thresholds.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('LINKS_SIM_THRESHOLD=', result.stdout)
+        self.assertIn('SEMANTIC_THRESHOLD=', result.stdout)
+
+    def test_hash_in_filename_keeps_semantic_edge(self):
+        (self.notes / '报告 #1.md').write_text('# 报告\n\n## x\n一号报告', encoding='utf-8')
+        (self.notes / 'index.md').write_text('# 索引\n\n## x\n入口', encoding='utf-8')
+        env = (self.vault / '.env').read_text(encoding='utf-8')
+        (self.vault / '.env').write_text(
+            env + 'LINKS_SIM_THRESHOLD=0\nSEMANTIC_THRESHOLD=0\n', encoding='utf-8')
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        self.assertEqual(self.run_script('build_links.py').returncode, 0)
+        side = (self.vault / '.meta' / 'links' / 'notes' / 'index.md').read_text(encoding='utf-8')
+        self.assertIn('%231', side)
+        self.assertEqual(self.run_script('build_graph.py').returncode, 0)
+        g = json.loads((self.vault / '.meta' / 'graph.json').read_text(encoding='utf-8'))
+        targets = {e['target'] for e in g['edges'] if e.get('source') == 'notes/index.md'}
+        self.assertIn('notes/报告 #1.md', targets)
 
     def test_health_report_sections_order(self):
         self.assertEqual(self.run_script('embed.py').returncode, 0)

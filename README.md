@@ -13,6 +13,7 @@
 **默认零 API**：语义层用内置本地模型 `bge-small-zh-v1.5`（fastembed + onnxruntime，512 维、450 字分块、离线），不需要任何 key。检索 = 向量 + BM25 + 图谱 + agentic grep/glob。
 
 - **换更高质量的嵌入**：填 `EMBED_BASE_URL` + `EMBED_MODEL`，任意 OpenAI 兼容 `/embeddings` 端点都行（本地 `ollama pull qwen3-embedding:4b` 后指到 `http://127.0.0.1:11434/v1`；或智谱/OpenAI 云端）。换来源后跑一次 `embed.py --full` 重建向量库——内置模型保证升级前始终有可用嵌入。
+- **阈值**：默认随后端给出（内置 bge-small-zh：links 0.58 / high 0.72 / graph 0.62；HTTP：0.70/0.85/0.75）。换模型或换语料后跑 `python .meta/scripts/calibrate_thresholds.py`，把输出贴进 `.env`。
 - **LLM 层（可选）**：`HARNESS_MODE=full` + `DEEPSEEK_API_KEY` → 摘要 / tag / synthesize / semantic_lint P2 / `--rerank` / `--deep`。它**不影响检索正确性**——摘要不参与排序，只影响结果可读性与综述素材。
 - **DeepSeek 模型选型**：一律用最新版的**次等**模型（当前 `deepseek-v4-flash`；完整策略见 SKILL.md §约束）。
 - key 自备，走目标仓库的 `.env`（见 `templates/env.example`）。旧仓库只填了 `ZHIPU_*` 会被自动识别为语义层端点，无需迁移。

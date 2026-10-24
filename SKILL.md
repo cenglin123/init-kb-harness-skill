@@ -21,7 +21,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 **默认 = 基础层 + 语义层（本地内置模型），零 API。** LLM 层默认不开：摘要不参与排序（BM25/向量索引都不收 `.meta/summaries`），它只服务"命中列表多一行说明"和"主题综述素材"。
 
-**升级嵌入模型**（例如换 Zhipu / qwen3-embedding 等更高维模型）：改 `EMBED_BASE_URL` + `EMBED_MODEL` → `python .meta/scripts/embed.py --full` 重建向量库。内置模型保证升级前始终有可用嵌入。
+**升级嵌入模型**（例如换 Zhipu / qwen3-embedding 等更高维模型）：改 `EMBED_BASE_URL` + `EMBED_MODEL` → `python .meta/scripts/embed.py --full` 重建向量库。内置模型保证升级前始终有可用嵌入。换模型后建议跑一次 `calibrate_thresholds.py`——默认阈值随后端给出（内置 0.58/0.72/0.62，HTTP 0.70/0.85/0.75），但语料不同仍需校准。
 
 **配置变了怎么办**（唯一运维纪律）：模型/维度/分块变化后 `embed.py` 会**拒绝增量并提示** `--full`；`--full` 先写临时表、**全部成功**后才在一条事务里切换——任何一片失败都不切换；旧库保留，但要先把 `EMBED_*` 回退到与库一致的配置才能查询。
 
@@ -219,6 +219,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**默认内置本地模型（fastembed），可切任意 OpenAI 兼容 `/embeddings`**；HTTP 走跨文件线程池、内置走扁平批量推理；先探针后写库；配置变更**拒绝增量并提示 `--full`**，`--full` 先写临时表再原子换表；大文件闸门：超阈值且无 allow 决定的文件硬性跳过（llm_skip 决定同时清除历史向量） | HTTP 端点 或 fastembed | `--full` |
 | `summarize.py` | 每篇生成摘要 / tag sidecar；**跨文件并发 API**（LLM 层；`HARNESS_MODE=full` 时由 maintain 调用）；大文件闸门同 embed | DeepSeek | `--full` |
 | `build_index.py` | `.index/manifest.md` + 分类清单 + topics.md（office 文档以 📎 标记纳入） | 本地 | 无参 |
+| `calibrate_thresholds.py` | 只读采样当前嵌入库的相似度分布，输出建议的 `LINKS_SIM_THRESHOLD` / `LINKS_HIGH_THRESHOLD` / `SEMANTIC_THRESHOLD` / `ESCALATION_THRESHOLD`（换模型或换语料后跑一次） | 本地（需 embeddings.sqlite） | `--limit` / `--json` |
 | `build_links.py` | `.meta/links/` 语义关联 sidecar（纯余弦 + wikilink，**无 LLM**）；属语义层，按 content_hash+模型+阈值增量；graph 的 semantic 边读它（`--orphans` 只看用户手写链接） | 本地（需 embeddings.sqlite） | `--full` |
 | `build_graph.py` | 全局图谱 graph.json（wikilink + semantic 边）+ 断链报告 | 本地（semantic 边来自 build_links 产物；语义层关闭时只有 wiki/md 边） | 无参 |
 | `bm25_index.py` | BM25 稀疏倒排索引（自实现算法、零 API、零嵌入库依赖；**增量构建**——词频缓存只重算变化文件，并行分词，lite/full 均可用）→ `.meta/bm25_index.pkl.gz`（+ 文档词频缓存 `bm25_doc_cache.pkl.gz`；`--rebuild` 忽略缓存全量重建） | 本地 | `--build` / `--rebuild` / `--query "xxx" --top-k N` |

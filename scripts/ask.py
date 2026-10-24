@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_notes, rel_path, meta_mirror, ensure_parent,
     get_embeddings_client, embed_settings, embed_unavailable_hint,
-    llm_enabled, ENV,
+    llm_enabled, threshold_defaults, ENV,
     find_all_wikilinks, find_all_mdlinks, iter_markdown_content_lines,
     WIKILINK_RE, resolve_wikilink, resolve_mdlink, parse_aliases, log_script_run,
     rerank_with_llm, office_extract_source,
@@ -57,7 +57,8 @@ SECONDS_PER_YEAR = 365.25 * 86400
 EMBEDDINGS_WARN_THRESHOLD = 40000
 
 # === 低置信自动升级配置（初始启发式，随 .meta/escalation-stats.jsonl 校准数据重设）===
-ESCALATION_THRESHOLD = float(ENV.get('ESCALATION_THRESHOLD') or 0.6)  # final top-1 < 此值 → low_confidence
+ESCALATION_THRESHOLD = float(
+    ENV.get('ESCALATION_THRESHOLD') or threshold_defaults()['escalation'])  # final top-1 < 此值 → low_confidence
 ESCALATION_HYBRID_WEIGHTS = (0.3, 0.7) # (dense, bm25)；BM25 重权，对症 tag/字面失配
 GRAY_ZONE_LO, GRAY_ZONE_HI = 0.5, 0.7  # 衰减感知灰区 final score 区间
 GRAY_ZONE_AGE_YEARS = 1.0              # 灰区要求 top-1 结果 age > 此年数
