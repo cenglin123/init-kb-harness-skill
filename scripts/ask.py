@@ -375,7 +375,8 @@ def print_results(results):
 
 
 def find_orphans():
-    referenced = set()
+    referenced = set()          # 裸文件名（stem）引用
+    referenced_rels = set()     # 带路径的精确引用
     # 扫原文 wikilinks + markdown 链接
     for md in scan_notes():
         try:
@@ -387,7 +388,8 @@ def find_orphans():
         for target in find_all_wikilinks(content):
             t = target.strip()
             if '/' in t:
-                referenced.add(Path(t).stem)
+                rel = t if t.endswith('.md') else t + '.md'
+                referenced_rels.add(rel.strip('/'))
             else:
                 referenced.add(t)
 
@@ -395,7 +397,8 @@ def find_orphans():
         for display, target in find_all_mdlinks(content):
             t = unquote(target).split('#')[0].strip()
             if '/' in t:
-                referenced.add(Path(t).stem)
+                rel = t if t.endswith('.md') else t + '.md'
+                referenced_rels.add(rel.strip('/'))
             else:
                 stem = t[:-3] if t.endswith('.md') else t
                 referenced.add(stem)
@@ -405,8 +408,11 @@ def find_orphans():
 
     orphans = []
     for md in scan_notes():
+        rel = rel_path(md)
+        if rel in referenced_rels:
+            continue
         if md.stem not in referenced:
-            orphans.append(rel_path(md))
+            orphans.append(rel)
 
     print(f"\n孤儿笔记（未被任何 wikilink 或 markdown 链接引用）: {len(orphans)} 篇")
     for p in orphans[:30]:
@@ -563,7 +569,7 @@ def deep_search(query, iterations=3, breadth=5, scope='notes', decay_params=None
     round_outputs = []
 
     # Round 1: standard search
-    r1 = search_fn(query, top_k=breadth, scope=scope, decay_params=decay_params)
+    r1 = search_fn(query, top_k=breadth, scope=scope, decay_params=decay_params) or []
     for path, sim in r1:
         key = (path, 0)
         if key not in all_results or sim > all_results[key]:
@@ -581,7 +587,7 @@ def deep_search(query, iterations=3, breadth=5, scope='notes', decay_params=None
                 synonyms = client.generate_synonyms(query, n=2)
                 r2_merged = []
                 for syn in synonyms:
-                    sub_results = search_fn(syn, top_k=breadth, scope=scope, decay_params=decay_params)
+                    sub_results = search_fn(syn, top_k=breadth, scope=scope, decay_params=decay_params) or []
                     r2_merged.extend(sub_results)
                 degraded = True
                 reason = extracted.get('error', 'unknown')
@@ -589,7 +595,7 @@ def deep_search(query, iterations=3, breadth=5, scope='notes', decay_params=None
                 sub_queries = extracted.get('sub_queries', [])
                 r2_merged = []
                 for sq in sub_queries:
-                    sub_results = search_fn(sq, top_k=breadth, scope=scope, decay_params=decay_params)
+                    sub_results = search_fn(sq, top_k=breadth, scope=scope, decay_params=decay_params) or []
                     r2_merged.extend(sub_results)
                 degraded = False
                 reason = None
@@ -601,7 +607,7 @@ def deep_search(query, iterations=3, breadth=5, scope='notes', decay_params=None
             try:
                 synonyms = client.generate_synonyms(query, n=2)
                 for syn in synonyms:
-                    sub_results = search_fn(syn, top_k=breadth, scope=scope, decay_params=decay_params)
+                    sub_results = search_fn(syn, top_k=breadth, scope=scope, decay_params=decay_params) or []
                     r2_merged.extend(sub_results)
             except Exception:
                 # Synonym fallback also failed — round produces no results
@@ -706,6 +712,9 @@ def hybrid_search(query, top_k=5, scope='notes', decay_params=None, weights=(0.6
         print(f"⚠️  BM25 检索失败，退化为纯 Dense: {e}", file=sys.stderr)
         return dense_results
     if bm25_raw is None:
+        if dense_results is None:
+            print("⚠️  语义层与 BM25 均不可用", file=sys.stderr)
+            return None
         print("⚠️  BM25 索引不可用，hybrid 退化为纯 Dense", file=sys.stderr)
         return dense_results
     if dense_results is None:

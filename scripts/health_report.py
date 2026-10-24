@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, scan_notes, rel_path
+from common import VAULT_ROOT, scan_notes, scan_office_extracts, rel_path, embed_settings
 from inbox_scan import main as inbox_scan_main
 
 REPORT_PATH = VAULT_ROOT / '.meta' / 'health-report.md'
@@ -216,45 +216,60 @@ def load_deviation_signals():
 
 
 def semantic_health(total_notes: int) -> dict:
-    """语义层覆盖率/新鲜度：bootstrap 验收与日常巡检用。"""
+    """语义层覆盖率/新鲜度/配置一致性：bootstrap 验收与日常巡检用。"""
     db = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
+    corpus_total = total_notes + len(list(scan_office_extracts()))
     out = {'ok': False, 'detail': '未建立（.meta/embeddings.sqlite 不存在）',
-           'coverage': 0.0, 'rows': 0, 'model': '', 'dim': 0, 'built_at': ''}
+           'coverage': 0.0, 'rows': 0, 'model': '', 'dim': 0, 'built_at': '',
+           'corpus_total': corpus_total}
+    cfg = embed_settings()
+    if not cfg['enabled']:
+        out['detail'] = '语义层未启用（EMBED_PROVIDER=off 或依赖缺失）'
+        return out
     if not db.exists():
         return out
     try:
         con = sqlite3.connect(str(db))
         try:
             meta = con.execute(
-                "SELECT model, dim, generated_at FROM embed_meta WHERE id=1").fetchone()
+                "SELECT model, dim, chunk_chars, chunk_overlap, provider "
+                "FROM embed_meta WHERE id=1").fetchone()
             rows = con.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
             paths = {r[0] for r in con.execute("SELECT DISTINCT path FROM embeddings")}
+            last = con.execute("SELECT MAX(generated_at) FROM embeddings").fetchone()[0]
         finally:
             con.close()
     except sqlite3.Error as e:
-        out['detail'] = f'库不可读（{e}）'
+        out['detail'] = f'库不可读（{e}）；请 embed.py --full 重建'
         return out
     if not meta:
         out['detail'] = '缺少 embed_meta（未完成一次成功构建）'
         return out
-    note_paths = {p for p in paths if p.endswith('.md') and not p.startswith('.meta/')}
+    if meta[0] != cfg['model']:
+        out['detail'] = f'库内模型 {meta[0]} ≠ 当前配置 {cfg["model"]}；需 embed.py --full'
+        return out
+    note_paths = {p for p in paths if not p.startswith('.meta/')}
     out.update({
         'ok': rows > 0,
         'rows': rows,
         'model': meta[0],
         'dim': meta[1],
-        'built_at': (meta[2] or '')[:19],
-        'coverage': (len(note_paths) / total_notes) if total_notes else 0.0,
-        'detail': f'{len(note_paths)}/{total_notes} 篇笔记有向量',
+        'built_at': (last or '')[:19],
+        'coverage': (len(note_paths) / corpus_total) if corpus_total else 0.0,
+        'detail': f'{len(note_paths)}/{corpus_total} 个语料文件有向量',
     })
     return out
 
 
 def _count_report_items(path: Path) -> int:
-    """统计挂起/超时清单里的条目数（`- \`...\`` 行），文件不存在返回 0。"""
+    """统计清单条目数：既支持 `- \`path\`` 列表，也支持 `| \`path\` | ...` 表格。"""
     try:
-        return sum(1 for line in path.read_text(encoding='utf-8').splitlines()
-                   if line.startswith('- `'))
+        n = 0
+        for line in path.read_text(encoding='utf-8').splitlines():
+            t = line.strip()
+            if t.startswith('- `') or t.startswith('| `'):
+                n += 1
+        return n
     except Exception:
         return 0
 
@@ -275,14 +290,15 @@ def build_report(total, by_category, inbox, orphans, active_orphans, archived_or
         f"- 收件箱待归类: {len(inbox)} 项",
         f"- 稀疏分类: {len(sparse)} 个（< {SPARSE_CATEGORY_MIN} 篇）",
         "",
-        "## 告警",
-        "",
     ]
 
     sem = semantic_health(total)
     pending_large = _count_report_items(VAULT_ROOT / '.meta' / 'large-files-pending.md')
     office_timeouts = _count_report_items(
         VAULT_ROOT / '.meta' / 'office-extracts' / '_timeouts.md')
+    office_failures = _count_report_items(
+        VAULT_ROOT / '.meta' / 'office-extracts' / '_failures.md')
+    embed_skipped = _count_report_items(VAULT_ROOT / '.meta' / 'embed-skipped.md')
     sem_lines = [
         "## 语义层",
         "",
@@ -298,9 +314,11 @@ def build_report(total, by_category, inbox, orphans, active_orphans, archived_or
         sem_lines.append(f"- 待决大文件: {pending_large}（见 `.meta/large-files-pending.md`）")
     if office_timeouts:
         sem_lines.append(f"- office 提取超时: {office_timeouts}（见 `_timeouts.md`）")
+    if office_failures:
+        sem_lines.append(f"- office 提取失败: {office_failures}（见 `_failures.md`）")
+    if embed_skipped:
+        sem_lines.append(f"- 不可读笔记（未嵌入）: {embed_skipped}（见 `embed-skipped.md`）")
     sem_lines.append("")
-
-    lines.extend(sem_lines)
 
     alerts = []
     if not sem['ok']:
@@ -319,8 +337,10 @@ def build_report(total, by_category, inbox, orphans, active_orphans, archived_or
     if not alerts:
         alerts.append("- ✅ 无异常")
 
+    lines.extend(["## 告警", ""])
     lines.extend(alerts)
     lines.append("")
+    lines.extend(sem_lines)
 
     # 收件箱
     lines.extend([

@@ -55,7 +55,7 @@ Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 
 
 ## 依赖
 
-- **Python 3.10+**
+- **Python 3.10+**（离线套装的 wheel 为 CPython 3.13；用套装时固定 3.13）
 - **默认**：零 API key；语义层用内置 fastembed（随离线套装预置 wheel + 模型缓存）；**可选**：任意 OpenAI 兼容 embeddings 端点、DeepSeek API key
 - **office 提取**：python-docx / openpyxl / python-pptx / pypdf（随 requirements.txt 安装；缺装时对应格式跳过）
 - **Git Bash**（Git for Windows 自带；pre-commit hook 是 bash 脚本。纯 GitHub Desktop / TortoiseGit 无 bash 环境需另装）

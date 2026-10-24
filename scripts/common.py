@@ -679,19 +679,12 @@ def resolve_mode() -> str:
 def llm_enabled(mode=None) -> bool:
     """LLM 层（摘要/精排）可用性唯一闸门：有 key 且模式为 full。
 
-    未写 HARNESS_MODE 的旧仓库（有 key）视为启用，避免既有安装静默失去精排；
-    非法值按 lite（与 resolve_mode 一致），不会出现"显示 lite 却花钱"。
+    未写 HARNESS_MODE 一律按 lite（与 resolve_mode 一致）——旧的 full 仓库请显式写
+    HARNESS_MODE=full；非法值同样按 lite，不会出现"显示 lite 却花钱"。
     """
     if not (ENV.get('DEEPSEEK_API_KEY') or '').strip():
         return False
-    if mode is not None:
-        return mode == 'full'
-    raw = (ENV.get('HARNESS_MODE') or '').strip().lower()
-    if raw in ('lite', 'full'):
-        return raw == 'full'
-    if raw:
-        return False
-    return True
+    return (mode or resolve_mode()) == 'full'
 
 
 def embed_chunk_defaults() -> tuple:

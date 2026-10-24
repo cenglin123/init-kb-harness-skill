@@ -328,6 +328,57 @@ class SemanticLayerTests(unittest.TestCase):
         g = json.loads((self.vault / '.meta' / 'graph.json').read_text(encoding='utf-8'))
         self.assertIn('fake-embed', g['model'])
 
+    def test_hybrid_returns_none_when_both_layers_unavailable(self):
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        self.server.dim = 4                       # 语义库与端点不一致
+        (self.vault / '.meta' / 'bm25_index.pkl.gz').unlink(missing_ok=True)  # BM25 也不可用
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "from ask import hybrid_search;"
+                "print(hybrid_search('索引重建'))" % self.scripts)
+        result = self.subprocess_py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertIn('None', result.stdout)
+
+    def test_deep_hybrid_does_not_crash_when_nothing_available(self):
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        self.server.dim = 4
+        (self.vault / '.meta' / 'bm25_index.pkl.gz').unlink(missing_ok=True)
+        (self.vault / '.env').write_text(
+            (self.vault / '.env').read_text(encoding='utf-8')
+            + 'DEEPSEEK_API_KEY=test\nDEEPSEEK_BASE_URL=http://127.0.0.1:9/v1\n',
+            encoding='utf-8')
+        result = self.run_script('ask.py', '--deep', '--hybrid', '索引重建')
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertIn(result.returncode, (0, 2))
+
+    def test_full_with_no_embeddable_content_fails(self):
+        # 只剩一篇不可读笔记：没有任何用户语料向量 → 不得报成功
+        (self.notes / 'a-维护.md').unlink()
+        (self.notes / 'b-周报.md').unlink()
+        (self.notes / 'gbk.md').write_bytes('# GBK\n\n## x\n国标'.encode('gbk'))
+        result = self.run_script('embed.py', '--full')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('没有可嵌入的内容', result.stdout)
+
+    def test_inbox_scan_respects_llm_gate(self):
+        (self.vault / '收件箱条目.md').write_text('# 待归类\n\n## x\n内容', encoding='utf-8')
+        (self.vault / '.env').write_text(
+            'HARNESS_MODE=lite\nPRIMARY_HOST=\nDEEPSEEK_API_KEY=test\n'
+            'DEEPSEEK_BASE_URL=http://127.0.0.1:9/v1\n', encoding='utf-8')
+        result = self.run_script('inbox_scan.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('仅列出', result.stdout)
+        self.assertNotIn('[LLM]', result.stdout)
+
+    def test_health_report_sections_order(self):
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        self.assertEqual(self.run_script('build_graph.py').returncode, 0)
+        self.assertEqual(self.run_script('health_report.py').returncode, 0)
+        text = (self.vault / '.meta' / 'health-report.md').read_text(encoding='utf-8')
+        self.assertIn('## 语义层', text)
+        self.assertLess(text.index('## 告警'), text.index('## 语义层'))
+
     def test_bm25_granularity_is_independent_of_embed_provider(self):
         # BM25 是基础层，其分块粒度不能随语义层配置变化
         self.write_env(enabled=False)

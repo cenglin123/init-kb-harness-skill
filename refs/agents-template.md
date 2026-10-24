@@ -42,7 +42,7 @@ Vault/
 ### 三条元原则
 - **I · Occam** — 如无必要，勿增实体
 - **II · Separation of Authorship** — 谁写的谁看（用户原文 vs Agent 的 `.meta/`，两类产物永不混入）。Agent 产物必带 `agent` / `model` / `generated_at`；技术类笔记加 `applies`（universal / agent-bound / mixed）
-- **III · Bitter Lesson** — 通用方法优于硬编码先验；语义层/LLM 层启用时优先 embedding 与语义检索，未启用时 agentic 检索（agent 自身就是通用方法）
+- **III · Bitter Lesson** — 通用方法优于硬编码先验；语义层是默认能力，检索优先 `ask.py` 语义召回；语义层明确不可用时才退回 agentic 检索（agent 自身就是通用方法）
 
 ### 检索方法默认
 

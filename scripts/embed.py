@@ -66,8 +66,8 @@ def _chunk_params() -> tuple:
 # 分块粒度可配（BM25 用自己固定的粒度，不受这里影响）
 CHUNK_CHARS, CHUNK_OVERLAP = _chunk_params()
 # builtin 扁平批量的文件批大小 / 单批 chunk 上限（控内存峰值）
-FILE_BATCH = _env_int('EMBED_FILE_BATCH', 64)
-CHUNK_BATCH = _env_int('EMBED_CHUNK_BATCH', 2048)
+FILE_BATCH = max(1, _env_int('EMBED_FILE_BATCH', 64))
+CHUNK_BATCH = max(1, _env_int('EMBED_CHUNK_BATCH', 2048))
 SKIPPED_REPORT = DB_PATH.parent / 'embed-skipped.md'
 
 
@@ -380,13 +380,18 @@ def main(full=False):
                 if staged:
                     _activate(db, client, dim)
                     print(f"  ✓ 已切换为新一代向量（{client.model} · {dim} 维）")
-                else:
+                elif has_rows:
                     print("  ⚠️  没有可嵌入的内容，保留原有向量不动（未切换）")
                     db.execute("DROP TABLE IF EXISTS embeddings_staging")
                     db.commit()
-            elif read_meta(db) is None and not has_rows:
-                write_meta(db, client.model, dim, client.provider)
-                db.commit()
+                else:
+                    # 语料存在但一条向量都建不出来（全部不可读/被闸门挂起）：
+                    # 这是失败而不是"无需更新"，否则会留下 0 行的假成功
+                    print("  ✗ 没有可嵌入的内容（全部不可读或被大文件闸门排除）")
+                    db.execute("DROP TABLE IF EXISTS embeddings_staging")
+                    db.commit()
+                    db.close()
+                    return 1
             db.close()
             return 0
 

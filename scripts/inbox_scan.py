@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, content_hash, DeepSeekClient
+from common import VAULT_ROOT, content_hash, DeepSeekClient, llm_enabled
 
 CACHE_PATH = VAULT_ROOT / '.meta' / 'inbox-suggestions.json'
 TAXONOMY_PATH = VAULT_ROOT / 'docs' / 'TAXONOMY.md'
@@ -172,6 +172,18 @@ def main():
     if not files:
         print("  ✓ 收件箱为空")
         return []
+
+    if not llm_enabled():
+        results = []
+        for fp in files:
+            try:
+                lines = len(fp.read_text(encoding='utf-8').splitlines())
+            except Exception:
+                lines = 0
+            results.append({'name': fp.name, 'lines': lines,
+                            'suggestion': '（LLM 层未启用，仅列出）', 'reason': ''})
+        print(f"  ⚠️  LLM 层未启用：仅列出 {len(results)} 个收件箱文件（不调 API）")
+        return results
 
     taxonomy = load_taxonomy()
     taxonomy_dirs = load_taxonomy_dirs()

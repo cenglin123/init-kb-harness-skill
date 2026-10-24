@@ -48,6 +48,23 @@ from common import (
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
 
+def _corpus_vector_count() -> int:
+    """embeddings 表里属于用户语料的向量落点数（排除 .meta/ 下的 memory/office）。"""
+    db = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
+    if not db.exists():
+        return 0
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(db))
+        try:
+            return con.execute(
+                "SELECT COUNT(*) FROM embeddings WHERE path NOT LIKE '.meta/%'").fetchone()[0]
+        finally:
+            con.close()
+    except Exception:
+        return 0
+
+
 def _legacy_mode() -> str:
     """未显式配置 HARNESS_MODE 时的推断。
 
@@ -461,6 +478,11 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
                 print("  ⚠️  语义层本轮失败（旧向量仍可用）；继续重建其余索引")
                 degraded.append('语义层')
                 semantic_failed = True
+            elif _corpus_vector_count() == 0:
+                # 退出码 0 但一条用户语料向量都没有（全部不可读/被闸门排除）
+                print("  ⚠️  语义层没有覆盖任何用户笔记（向量为 0）")
+                degraded.append('语义层')
+                semantic_failed = True
 
         if summarize_result is not None and summarize_result.returncode != 0:
             print("  ⚠️  summarize 失败（摘要/tag 本轮未更新）；继续重建其余索引")
@@ -494,7 +516,9 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
         links_result = run_script('build_links.py', full=full)
         outputs['links'] = log_subprocess_result('links', links_result)
         if links_result.returncode != 0:
-            print("  ⚠️  build_links 失败（非致命，图谱 semantic 边可能滞后）")
+            print("  ⚠️  build_links 失败（图谱 semantic 边可能滞后）")
+            degraded.append('语义层')
+            semantic_failed = True
 
     # 5/6 · 构建索引
     print("\n[5/6] 构建索引 ...")
@@ -601,10 +625,11 @@ def main(full=False, no_git=False, semantic_lint=False, skip_changelog=False):
     if degraded:
         print(f"\n⚠️  本轮降级完成：{'、'.join(sorted(set(degraded)))} 未成功。"
               f"其余索引已更新；修复后重跑维护即可补齐。")
-    print(f"\n=== 维护完成，耗时 {elapsed:.1f}s ===")
+    print(f"\n=== 维护结束，耗时 {elapsed:.1f}s ===")
     if semantic_failed:
         print("⚠️  语义层未就绪：bootstrap 判定为未完成（需先恢复基础嵌入）")
         return 3
+    print("维护完成")
     return 0
 
 

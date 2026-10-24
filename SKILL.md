@@ -23,7 +23,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 **升级嵌入模型**（例如换 Zhipu / qwen3-embedding 等更高维模型）：改 `EMBED_BASE_URL` + `EMBED_MODEL` → `python .meta/scripts/embed.py --full` 重建向量库。内置模型保证升级前始终有可用嵌入。
 
-**配置变了怎么办**（唯一运维纪律）：模型/维度/分块变化后 `embed.py` 会**拒绝增量并提示** `--full`；`--full` 先写临时表、**全部成功**后才在一条事务里切换——任何一片失败都不切换、旧库继续可用。
+**配置变了怎么办**（唯一运维纪律）：模型/维度/分块变化后 `embed.py` 会**拒绝增量并提示** `--full`；`--full` 先写临时表、**全部成功**后才在一条事务里切换——任何一片失败都不切换；旧库保留，但要先把 `EMBED_*` 回退到与库一致的配置才能查询。
 
 **模式推断仅用于旧仓库**：未写 `HARNESS_MODE` 且嵌入库**没有** `embed_meta` 记录（旧版产物）时按 `full`；新式仓库（语义层产物有 meta）一律按 `lite`，不再由"库存在"反推 LLM 层。
 
@@ -113,7 +113,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 | 机制组 | 对应目标 | 安装件 |
 |--------|---------|--------|
-| **自维护**（maintain 管线） | 自维护 + 永无死角 + 不重复建设 | maintain.py + extract_office/index/graph/bm25/knowledge_map/health（+ 可选 embed/summarize） |
+| **自维护**（maintain 管线） | 自维护 + 永无死角 + 不重复建设 | maintain.py + extract_office/embed/build_links/index/graph/bm25/knowledge_map/health（+ 可选 summarize） |
 | **自沉淀**（memory + 衰减） | 知识复利 | memory/ 结构 + dream.py + synthesize.py |
 | **自运行**（入口 + 检索 + 硬约束） | 全部四目标的跨会话可持续 | AGENTS.md + ask.py + pre-commit hook + converge 治理 |
 
@@ -149,7 +149,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 1. 检测/调用 `init-agent-docs` 打底（见上方"已装检测与复用"）。覆盖 AGENTS.md 前，读取现有协作路由、用户改写的任务范围约定，以及 `kb-bootstrap-decisions.md` 中对此桥接的选择；沿用已确认的决定，不重复询问。先保留已启用协作约定及用户调整，再与本模板合并。
 2. 先完成 [agent-docs 布局迁移](refs/agent-docs-layout.md)，再拷贝**全部 KB 脚本**到 `.meta/scripts/`（见下方脚本清单——一次拷齐；已有 changelog.py 时不再部署等价 changelog_append.py；保留 docs_maintain.py/audit.py/check_all.py；各层共用同一套脚本）。用户选择启用协作桥接且目标是 Git 仓库时，从新版 init-agent-docs `assets/scripts/` 安装或复用唯一的 `worktree_task.py`；不另建 helper 副本或 hook
 3. `templates/env.example` → `.env`（默认 `HARNESS_MODE=lite` + `EMBED_PROVIDER=auto` 走内置本地模型，无需再配；要换嵌入端点填 `EMBED_BASE_URL` + `EMBED_MODEL`；要 LLM 层设 `full` 并填 key；另有 PRIMARY_HOST + MAINTAIN_CONCURRENCY + office 并发/超时 + 阈值）
-4. `pip install -r requirements.txt`（含 office 提取依赖 python-docx/openpyxl/python-pptx/pypdf）
+4. 安装 Python 依赖：**优先用离线套装**（`assets\scripts\15-install-kb-deps.ps1`，含 wheel + 内置嵌入模型缓存，固定 Python 3.13）；没有套装时才 `pip install -r requirements.txt`
 5. `docs/CONSTITUTION.md`（来自 `refs/constitution-template.md`）+ `docs/TAXONOMY.md`（Phase 0 草案）+ `AGENTS.md`（来自 `refs/agents-template.md`，`bootstrap_status: in_progress`）——AGENTS.md 是唯一入口，不生成任何同步副本。仅当目标是 Git 仓库且用户选择启用时，加入或合并可选协作段并安装唯一 helper；否则移除模板中的可选协作段，不装该 helper。替换模板时保留已确认的协作约定、用户自定义任务范围规则及其决定记录，不静默丢弃。
 6. 仅在目标仓库有 Git 时，安装 `.githooks/pre-commit`（来自 `refs/pre-commit-template`，统一版）并接线：`git config core.hooksPath .githooks`。没有 Git 时不安装或接线 hook，也不安装协作 helper；Git Bash 缺失时按下方前置缺失交互处理。
 7. 按 TAXONOMY.md 创建内容目录（如日记/复盘/收件箱等，名称因用户偏好而异）。若用户使用 Obsidian daily-notes 插件，配置 `.obsidian/daily-notes.json` 指向对应目录
@@ -189,11 +189,11 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 ### Bootstrap 完成判定
 
 1. `python .meta/scripts/maintain.py --full` **退出码 0**（默认：extract_office + embed + build_links + index + graph + bm25 + knowledge_map + health + dream；LLM 层另含 summarize）。退出码 3 = 语义层缺失/失败，bootstrap 不可判完成
-2. `health-report.md` 与 `.index/manifest.md` 生成；若仓库有 office 文档，`.meta/office-extracts/` 有产出
-3. **人审门（交互式）**：agent 引导用户跑一条真实问题检索——语义层未启用时用 `ask.py "query"`（自动降级 BM25）或 agentic grep/glob，启用时用语义检索（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
+2. `health-report.md` 与 `.index/manifest.md` 生成；健康报告的「语义层」段无 ⚠️（覆盖率为 0 或配置不一致都算未完成）；若仓库有 office 文档，`.meta/office-extracts/` 有产出
+3. **人审门（交互式）**：agent 引导用户跑一条真实问题检索——正常情况用 `ask.py "query"` 语义检索；若它报告语义层不可用（临时降级 BM25），说明 bootstrap **还不能判完成**，先按提示修复（office 为主的仓库应验证能命中 office 内容），然后给出选项请用户判定检索质量：a) 可接受 → 完成 b) 需调整 → 排查后重试 c) 暂不确认（保持 `in_progress`，原因记录进 plan）
 4. → 把 AGENTS.md 的 `bootstrap_status` 改 `completed`、`bootstrap_phase` 改 `phase3`，填 `bootstrap_completed_at: <date>`
 
-> **只有启用的层才受配置门控**：默认安装无需任何 key，`maintain.py --full` 可直接判 completed。选了 LLM 层但 key 稍后自填的仓库，`summarize` 必然失败——把那层的开关关掉（`HARNESS_MODE=lite`）即可完成 bootstrap，并在 kb-bootstrap-decisions.md 注明原因，key 配好后再开。
+> **只有启用的层才受配置门控**：默认安装无需任何 key，但**语义层必须真的建出向量**（`maintain.py --full` 退出码 0 且 health 语义段无告警）才可判 completed。选了 LLM 层但 key 稍后自填的仓库，`summarize` 必然失败——把那层的开关关掉（`HARNESS_MODE=lite`）即可完成 bootstrap，并在 kb-bootstrap-decisions.md 注明原因，key 配好后再开。
 
 > **诚实标注**：maturity-rubric 的画像提示全部机械可判；bootstrap 完成判定含一次人审门（用户确认检索质量）——前者是信息呈现、后者决定体系是否就绪。
 
@@ -207,8 +207,8 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
-| `maintain.py` | 维护主入口（全管线编排，见文件头）；语义层看 `EMBED_*` 是否配置，LLM 层看 `HARNESS_MODE=full` + key | 编排下方各脚本 | `--full`（重建本地派生件，不强制重嵌入）/ `--no-git` / `--semantic-lint` / `--skip-changelog` |
-| `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**语义层不可用（未配端点或库未建）时自动降级**：默认查询与 --check 走 BM25（含 --scope 过滤），--deep/--rerank 明确报缺；有嵌入库时**低置信自动升级**（top-1<阈值自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`，阈值 `.env:ESCALATION_THRESHOLD` 可调） | embeddings.sqlite + graph.json + bm25 索引；embeddings 端点（查询）、DeepSeek（--rerank/--deep） | `"query"` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
+| `maintain.py` | 维护主入口（全管线编排，见文件头）；语义层默认启用（内置模型），LLM 层看 `HARNESS_MODE=full` + key；语义层缺失/失败时退出码 3 | 编排下方各脚本 | `--full`（重建本地派生件，不强制重嵌入）/ `--no-git` / `--semantic-lint` / `--skip-changelog` |
+| `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**语义层运行时不可用（库空/维度不符/端点断/索引损坏）时自动降级**：默认查询与 --check 走 BM25（含 --scope 过滤），两者都不可用时退出码 2；--deep/--rerank 需 LLM 层；有嵌入库时**低置信自动升级**（top-1<阈值自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`，阈值 `.env:ESCALATION_THRESHOLD` 可调） | embeddings.sqlite + graph.json + bm25 索引；embeddings 端点（查询）、DeepSeek（--rerank/--deep） | `"query"` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
 | `whoami.py` | 模型/provider 自检（两层识别：harness 路由 codex/claude-code/opencode → 内部 provider）；`--frontmatter` 输出溯源 YAML（agent/model/generated_at，`WHOAMI_AGENT` env 可显式指定宿主） | 本地只读，零 API | 无参 / `--frontmatter` |
 
 ### 提取与索引层
@@ -228,7 +228,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
 | `knowledge_map.py` | 消费 graph.json → `.meta/knowledge-map.md`（god nodes / 跨域连接 / 社区 / 偏差信号） | 本地零 API | 无参 |
-| `health_report.py` | `.meta/health-report.md`（孤儿/收件箱/稀疏分类告警，阈值 env 可调） | 本地 | 无参 |
+| `health_report.py` | `.meta/health-report.md`（孤儿/收件箱/稀疏分类 + **语义层覆盖率/模型/新鲜度/挂起与超时** 告警，阈值 env 可调） | 本地（收件箱建议需 LLM 层，未启用时只列文件） | 无参 |
 | `dream.py` | 记忆活性扫描 + 衰减预警 + 唤醒检测 → `.meta/dream-report.md`（所有建议均为提案不自动执行） | 本地零 API（git + frontmatter） | `--full`（预留） |
 | `semantic_lint.py` | P0 断链 / P1 孤儿概念·过时标记（本地启发式）/ P2 矛盾检测（DeepSeek，**LLM 层**）→ `.meta/semantic-lint-report.md` | P2 需 DeepSeek | 默认 quick / `--deep` / 回归测试类 `--check-*` |
 | `synthesize.py` | 主题合成（多篇聚合生成综述）→ `.meta/syntheses/`（**LLM 层**；未启用时由 agent 直接读文兼任） | DeepSeek | `--theme` / `--scope`（glob，逗号分隔）/ `--prompt` / `--max-notes` |
@@ -339,7 +339,7 @@ target-vault/
 3. **并发与限速**：MAINTAIN_CONCURRENCY 默认 6，与 API_RATE_LIMIT_MS 配合。触发 API 限流时先调低并发，不要关并发。
 4. **单用户单机假设**：本 harness 默认单机模型。多用户/多机仓库的主从边界需在 Phase 0 画像提示后由用户确认。
 5. **嵌入与 LLM 分层**：语义层是基础能力，默认用**内置本地模型**（fastembed + `bge-small-zh-v1.5`，450 字分块、512 维，零 API），也可切 **HTTP**（任意 OpenAI 兼容 `/embeddings`：Ollama、vLLM、LM Studio、智谱、OpenAI，同一份代码，维度实测）。`EMBED_PROVIDER=auto` 下 HTTP 配置优先、否则内置；`base_url`/`model` 只填一个会报配置错误（不静默降级）；`off` 仅排障用。换来源后必须 `embed.py --full`。LLM 层是可选增强（`HARNESS_MODE=full` + `DEEPSEEK_API_KEY`），**DeepSeek 模型一律选最新版的次等模型**（当前 `deepseek-v4-flash`）：维护管线是批量任务，旗舰 pro 类模型成本不划算。
-6. **能力边界与恢复**：语义层是基础能力——未就绪时 `ask.py` 临时降级 BM25 并说明原因，但 `maintain` 会以**退出码 3** 结束、`health-report` 会报覆盖率与告警，bootstrap 不可判定完成。恢复三步：① `pip install fastembed`（离线套装用 `15-install-kb-deps.ps1`）；② 模型缓存缺失/损坏 → `-ForceModelCopy` 或设 `HF_ENDPOINT` 后联网首跑；③ 换过模型/维度 → `embed.py --full`。默认模型 `bge-small-zh-v1.5` 是中文 512-token 模型：英文/多语库召回会偏弱，建议切多语模型或 HTTP 端点。<br>LLM 层关闭时摘要/tag 不存在、`ask.py` 结果无摘要行——这是取舍；office 超大/损坏文件超时会跳过并登记，不影响其余文件与基础索引。
+6. **能力边界与恢复**：语义层是基础能力——未就绪时 `ask.py` 临时降级 BM25 并说明原因，但 `maintain` 会以**退出码 3** 结束、`health-report` 会报覆盖率与告警，bootstrap 不可判定完成。恢复三步：① `pip install fastembed`（离线套装用 `15-install-kb-deps.ps1`）；② 模型缓存缺失/损坏 → `-ForceModelCopy` 或设 `HF_ENDPOINT` 后联网首跑；③ 换过模型/维度 → `embed.py --full`。默认模型 `bge-small-zh-v1.5` 是中文 512-token 模型：英文/多语库召回会偏弱，建议切多语模型或 HTTP 端点。<br>LLM 层关闭时摘要/tag 不存在、`ask.py` 结果无摘要行——这是取舍；office 超大/损坏文件超时会跳过并登记（`.meta/office-extracts/_timeouts.md` / `_failures.md`），非 UTF-8 笔记登记 `.meta/embed-skipped.md`，均不影响其余文件与基础索引。
 7. **大文件闸门（任一层启用时）**：超 `LARGE_FILE_THRESHOLD_MB`（默认 1MB，`.env` 可调）的单文件被脚本硬性挡在 embed/summarize 外并挂起（`.meta/large-files-pending.md`），**BM25/图谱/manifest 索引照常覆盖该文件**；维护完成后 agent 必须逐个向用户询问 5 个处理选项，决定落 `.meta/rules/large-file-policy.md`（allow / llm_skip / skip；切分与删除完成后删除对应行即自动出清单）。`llm_skip` 会在下次维护清除该文件历史向量。闸门只拦 LLM 管线，不拦 agentic grep/glob 阅读——agent 按用户要求仍可人工读改大文件。
 8. **治理机制不复刻**：converge 机制权威源是全局 converge SKILL；本技能只在目标仓库落路径绑定与 charter 指针。
 9. **快照维护债**：bundle 脚本会随上游演进 drift。维护者 drift 检测说明见 README「for maintainers」小节。
