@@ -19,7 +19,8 @@ from pathlib import Path
 from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, scan_notes, scan_office_extracts, rel_path, embed_settings
+from common import (VAULT_ROOT, scan_notes, scan_office_extracts, rel_path,
+                    embed_settings, ENV)
 from inbox_scan import main as inbox_scan_main
 
 REPORT_PATH = VAULT_ROOT / '.meta' / 'health-report.md'
@@ -30,10 +31,19 @@ TREND_PATH = VAULT_ROOT / '.meta' / 'health-trend.csv'
 
 # ─── 参数化阈值（env 可覆盖）──────────────────────────────────────────────────
 import os as _os
-ORPHAN_ALERT_THRESHOLD = int(_os.environ.get('ORPHAN_ALERT_THRESHOLD', '20'))
-INBOX_ALERT_THRESHOLD = int(_os.environ.get('INBOX_ALERT_THRESHOLD', '5'))
-SPARSE_CATEGORY_MIN = int(_os.environ.get('SPARSE_CATEGORY_MIN', '3'))
-ARCHIVE_MARKERS = tuple(m.strip() for m in _os.environ.get('ARCHIVE_MARKERS', '归档').split(',') if m.strip())
+def _env_int(name, default):
+    raw = ENV.get(name) or _os.environ.get(name) or str(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+ORPHAN_ALERT_THRESHOLD = _env_int('ORPHAN_ALERT_THRESHOLD', 20)
+INBOX_ALERT_THRESHOLD = _env_int('INBOX_ALERT_THRESHOLD', 5)
+SPARSE_CATEGORY_MIN = _env_int('SPARSE_CATEGORY_MIN', 3)
+ARCHIVE_MARKERS = tuple(
+    m.strip() for m in (ENV.get('ARCHIVE_MARKERS') or _os.environ.get('ARCHIVE_MARKERS', '归档')).split(',')
+    if m.strip())
 
 TOP_EXCLUDES = {
     'AGENTS.md',
@@ -248,15 +258,18 @@ def semantic_health(total_notes: int) -> dict:
     if meta[0] != cfg['model']:
         out['detail'] = f'库内模型 {meta[0]} ≠ 当前配置 {cfg["model"]}；需 embed.py --full'
         return out
-    note_paths = {p for p in paths if not p.startswith('.meta/')}
+    # 用户语料 = 笔记 + office 提取件（memory 单独统计）
+    corpus_paths = {p for p in paths
+                    if not p.startswith('.meta/')
+                    or p.startswith('.meta/office-extracts/')}
     out.update({
-        'ok': rows > 0,
+        'ok': rows > 0 and bool(corpus_paths) if corpus_total else rows > 0,
         'rows': rows,
         'model': meta[0],
         'dim': meta[1],
         'built_at': (last or '')[:19],
-        'coverage': (len(note_paths) / corpus_total) if corpus_total else 0.0,
-        'detail': f'{len(note_paths)}/{corpus_total} 个语料文件有向量',
+        'coverage': (len(corpus_paths) / corpus_total) if corpus_total else 0.0,
+        'detail': f'{len(corpus_paths)}/{corpus_total} 个语料文件有向量',
     })
     return out
 
@@ -318,6 +331,21 @@ def build_report(total, by_category, inbox, orphans, active_orphans, archived_or
         sem_lines.append(f"- office 提取失败: {office_failures}（见 `_failures.md`）")
     if embed_skipped:
         sem_lines.append(f"- 不可读笔记（未嵌入）: {embed_skipped}（见 `embed-skipped.md`）")
+
+    # 语义段内的告警（SKILL 的完成判定要求这一段没有 ⚠️）
+    if sem['corpus_total'] and sem['coverage'] == 0:
+        sem_lines.append("- ⚠️ 覆盖率为 0：没有任何用户语料进入向量库")
+    elif sem['coverage'] < 0.8:
+        sem_lines.append(f"- ⚠️ 覆盖率不足 80%（{sem['coverage'] * 100:.0f}%），"
+                         f"检查不可读/超时/失败清单")
+    if pending_large:
+        sem_lines.append(f"- ⚠️ {pending_large} 个大文件待决定（未进嵌入/LLM 管线）")
+    if office_timeouts:
+        sem_lines.append(f"- ⚠️ {office_timeouts} 个 office 文件提取超时")
+    if office_failures:
+        sem_lines.append(f"- ⚠️ {office_failures} 个 office 文件提取失败")
+    if embed_skipped:
+        sem_lines.append(f"- ⚠️ {embed_skipped} 篇非 UTF-8/不可读笔记未嵌入")
     sem_lines.append("")
 
     alerts = []

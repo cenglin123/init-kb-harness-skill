@@ -7,7 +7,7 @@ build_graph.py — 全量重建 .meta/graph.json（L3 关联与发现层）
 
 边类型：
   - user-wikilink (weight=1.0) — 扫原文 [[xxx]] 与 [text](target.md)，按 Obsidian 算法解析
-  - semantic      (weight>0.75) — 读 .meta/links/，抽 sim 分数
+  - semantic      (weight > SEMANTIC_THRESHOLD；内置模型 0.62 / HTTP 0.75) — 读 .meta/links/，抽 sim 分数
 
 节点字段：
   id, basename, category, archived, size_lines, mtime, aliases,
@@ -20,7 +20,7 @@ build_graph.py — 全量重建 .meta/graph.json（L3 关联与发现层）
   - 复刻 Obsidian 官方 wikilink 解析算法（basename 最短路径优先）
   - 尊重 frontmatter aliases
   - 不存 stats 块（派生数据，由消费方自算；仅打印到 stdout）
-  - 稀疏化：semantic 边 weight > 0.75 才保留（宪法 Article 6）
+  - 稀疏化：semantic 边 weight > SEMANTIC_THRESHOLD 才保留（阈值随后端给出）
 
 用法：python .meta/scripts/build_graph.py
 """
@@ -45,7 +45,7 @@ from common import (
     iter_markdown_content_lines, INTERNAL_ATTACHMENT_EXTS,
     extract_frontmatter, parse_aliases,
     pick_closest_by_prefix, resolve_wikilink, resolve_mdlink,
-    is_primary_host, SEMANTIC_THRESHOLD, is_excluded,
+    is_primary_host, SEMANTIC_THRESHOLD, is_excluded, ENV, threshold_defaults,
 )
 
 GRAPH_PATH = VAULT_ROOT / '.meta' / 'graph.json'
@@ -57,7 +57,7 @@ SCHEMA_VERSION = 2
 # 归档目录关键词（与 health_report.py ARCHIVE_MARKERS 同源），env 可覆盖
 import os as _os
 ARCHIVE_KEYWORDS = tuple(
-    m.strip() for m in _os.environ.get('ARCHIVE_MARKERS', '归档').split(',') if m.strip()
+    m.strip() for m in (ENV.get('ARCHIVE_MARKERS') or _os.environ.get('ARCHIVE_MARKERS', '归档')).split(',') if m.strip()
 ) or ('归档',)
 CLIP_JUNK_TARGETS = {'↩', 'link', 'PDF', 'HTML'}
 META_DOC_FILES = {'AGENTS.md', 'README.md', 'CHANGELOG.md'}
@@ -347,7 +347,7 @@ def scan_semantic_edges(all_paths, basename_index, aliases_index):
             if target is None or target == source:
                 continue  # semantic 断链静默（links 里的目标可能已删）
 
-            confidence = 'INFERRED' if weight >= 0.85 else 'AMBIGUOUS'
+            confidence = 'INFERRED' if weight >= threshold_defaults()['links_high'] else 'AMBIGUOUS'
             edge = {
                 'source': source,
                 'target': target,

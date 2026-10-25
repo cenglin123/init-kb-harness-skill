@@ -38,7 +38,13 @@ if sys.platform == "win32":
 
 # ─── 加载 .env ─────────────────────────────────────────────────────────────
 def find_vault_root() -> Path:
-    """从脚本位置向上找 vault 根（含 AGENTS.md 和 .meta/）"""
+    """定位 vault 根：VAULT_ROOT 环境变量优先，否则从脚本位置向上找。"""
+    override = os.environ.get('VAULT_ROOT', '').strip()
+    if override:
+        p = Path(override).expanduser().resolve()
+        if (p / 'AGENTS.md').exists() and (p / '.meta').is_dir():
+            return p
+        raise RuntimeError(f"VAULT_ROOT={p} 不是有效 vault（需 AGENTS.md + .meta/）")
     p = Path(__file__).resolve()
     while p != p.parent:
         if (p / 'AGENTS.md').exists() and (p / '.meta').is_dir():
@@ -74,7 +80,7 @@ def _load_privacy_dirs() -> set:
     （## 隐私目录 / ## 受保护目录 等）的列表项提取**裸目录名**（不含路径分隔符）；
     否则空。注：只解析专用段的 `- ` 列表项，不扫全文任意【】token——避免把
     示例路径里的归档/分类目录名误当隐私目录（e2e 发现的回归）。"""
-    env_val = os.environ.get('PRIVACY_DIRS', '').strip()
+    env_val = (ENV.get('PRIVACY_DIRS') or os.environ.get('PRIVACY_DIRS', '')).strip()
     if env_val:
         return {d.strip() for d in env_val.split(',') if d.strip()}
     cp = VAULT_ROOT / '.meta' / 'rules' / 'category-privacy.md'
@@ -690,13 +696,41 @@ def embed_chunk_defaults() -> tuple:
     return BUILTIN_CHUNK_DEFAULT if embed_settings()['provider'] == 'builtin' else HTTP_CHUNK_DEFAULT
 
 
+_stored_provider_cache = object()
+
+
+def _stored_embed_provider():
+    """从嵌入库 embed_meta 读取构建来源（无库/无记录返回 None）。"""
+    global _stored_provider_cache
+    if _stored_provider_cache is not object():
+        return _stored_provider_cache
+    db = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
+    value = None
+    if db.exists():
+        try:
+            import sqlite3
+            con = sqlite3.connect(str(db))
+            try:
+                row = con.execute(
+                    "SELECT provider FROM embed_meta WHERE id=1").fetchone()
+                value = row[0] if row and row[0] else None
+            finally:
+                con.close()
+        except Exception:
+            value = None
+    _stored_provider_cache = value
+    return value
+
+
 def threshold_defaults() -> dict:
     """相似度阈值初始值：bge-small-zh 与云端 embedding-3 的余弦分布不同。
 
     内置模型取 0.58/0.72/0.62（实测相关对 0.64–0.78、不相关 ≤0.44 的中间带）；
     HTTP 端点沿用 0.70/0.85/0.75。都可用 .env 覆盖，或跑 calibrate_thresholds.py 校准。
     """
-    if embed_settings()['provider'] == 'builtin':
+    # 以库内记录的构建来源为准（从机没有 fastembed 时也能用对阈值）；env 显式配置优先
+    provider = embed_settings()['provider'] or _stored_embed_provider()
+    if provider == 'builtin':
         return {'links': 0.58, 'links_high': 0.72, 'graph': 0.62, 'escalation': 0.50}
     return {'links': 0.70, 'links_high': 0.85, 'graph': 0.75, 'escalation': 0.60}
 
@@ -1190,36 +1224,44 @@ def resolve_wikilink(target: str, source_path: str,
                      all_paths: set):
     """复刻 Obsidian wikilink 解析算法。
     支持 [[target]]、[[target|alias]]、[[target#heading]]、[[../path/note]]。
+    先按原始字符串解析，失败再还原 %XX（兼容文件名本身含 % 的情况）。
     返回 (resolved_path, None) 成功，(None, reason) 失败。"""
-    t = unquote(target).strip()   # 还原 %23 等转义（'#' 会被当锚点）
-    if not t:
+    raw = target.strip()
+    if not raw:
         return None, 'empty target'
 
-    # 规则一：带 / —— vault-absolute 或相对路径（如 ../）
-    if '/' in t:
-        if t.startswith('..') or t.startswith('.'):
-            source_dir = source_path.rsplit('/', 1)[0] if '/' in source_path else ''
-            cand = posixpath.normpath(posixpath.join(source_dir, t))
-        else:
-            cand = t
-        if not cand.endswith('.md'):
-            cand += '.md'
-        if cand in all_paths:
-            return cand, None
-        return None, f'path not found: {t}'
+    decoded = unquote(raw)
+    candidates = [raw] if decoded == raw else [raw, decoded]
+    last_reason = 'not found'
+    for t in candidates:
+        # 规则一：带 / —— vault-absolute 或相对路径（如 ../）
+        if '/' in t:
+            if t.startswith('..') or t.startswith('.'):
+                source_dir = source_path.rsplit('/', 1)[0] if '/' in source_path else ''
+                cand = posixpath.normpath(posixpath.join(source_dir, t))
+            else:
+                cand = t
+            if not cand.endswith('.md'):
+                cand += '.md'
+            if cand in all_paths:
+                return cand, None
+            last_reason = f'path not found: {t}'
+            continue
 
-    # 规则二：frontmatter aliases
-    if t in aliases_index:
-        return aliases_index[t], None
+        # 规则二：frontmatter aliases
+        if t in aliases_index:
+            return aliases_index[t], None
 
-    # 规则三：basename（可能带 .md 后缀）
-    key = t[:-3] if t.endswith('.md') else t
-    candidates = basename_index.get(key, [])
-    if not candidates:
-        return None, f'basename not found: {t}'
-    if len(candidates) == 1:
-        return candidates[0], None
-    return pick_closest_by_prefix(source_path, candidates), None
+        # 规则三：basename（可能带 .md 后缀）
+        key = t[:-3] if t.endswith('.md') else t
+        found = basename_index.get(key, [])
+        if found:
+            if len(found) == 1:
+                return found[0], None
+            return pick_closest_by_prefix(source_path, found), None
+        last_reason = f'basename not found: {t}'
+
+    return None, last_reason
 
 
 def resolve_mdlink(target: str, source_path: str,

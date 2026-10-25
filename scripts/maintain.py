@@ -59,7 +59,8 @@ def _corpus_vector_count() -> int:
         con = sqlite3.connect(str(db))
         try:
             return con.execute(
-                "SELECT COUNT(*) FROM embeddings WHERE path NOT LIKE '.meta/%'").fetchone()[0]
+                "SELECT COUNT(DISTINCT path) FROM embeddings "
+                "WHERE path NOT LIKE '.meta/memory/%'").fetchone()[0]
         finally:
             con.close()
     except Exception:

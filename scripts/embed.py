@@ -67,7 +67,7 @@ def _chunk_params() -> tuple:
 # 分块粒度可配（BM25 用自己固定的粒度，不受这里影响）
 CHUNK_CHARS, CHUNK_OVERLAP = _chunk_params()
 # builtin 扁平批量的文件批大小 / 单批 chunk 上限（控内存峰值）
-FILE_BATCH = max(1, _env_int('EMBED_FILE_BATCH', 64))
+FILE_BATCH = max(1, _env_int('EMBED_FILE_BATCH', 256))
 CHUNK_BATCH = max(1, _env_int('EMBED_CHUNK_BATCH', 2048))
 SKIPPED_REPORT = DB_PATH.parent / 'embed-skipped.md'
 

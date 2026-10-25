@@ -415,6 +415,47 @@ class SemanticLayerTests(unittest.TestCase):
         targets = {e['target'] for e in g['edges'] if e.get('source') == 'notes/index.md'}
         self.assertIn('notes/报告 #1.md', targets)
 
+    def test_privacy_dirs_from_dotenv(self):
+        (self.vault / '.env').write_text(
+            'EMBED_PROVIDER=off\nPRIVACY_DIRS=secret\n', encoding='utf-8')
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "import common; print('secret' in common.EXCLUDE_DIRS)" % self.scripts)
+        result = self.subprocess_py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('True', result.stdout)
+
+    def test_office_extracts_count_as_corpus(self):
+        for name in ('a-维护.md', 'b-周报.md'):
+            (self.notes / name).unlink()
+        (self.vault / '.meta' / 'office-extracts').mkdir(parents=True, exist_ok=True)
+        (self.vault / '.meta' / 'office-extracts' / '报表.xlsx.md').write_text(
+            '# 报表\n\n## x\n营收数据', encoding='utf-8')
+        self.assertEqual(self.run_script('embed.py').returncode, 0)
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "import maintain; print('count', maintain._corpus_vector_count())" % self.scripts)
+        result = self.subprocess_py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('count 1', result.stdout)
+
+    def test_thresholds_fall_back_to_stored_provider(self):
+        self.assertEqual(self.run_script('embed.py').returncode, 0)   # 库内 provider=http
+        (self.vault / '.env').write_text('EMBED_PROVIDER=off\n', encoding='utf-8')
+        code = ("import sys; sys.path.insert(0, r'%s');"
+                "from common import threshold_defaults;"
+                "print(threshold_defaults()['graph'])" % self.scripts)
+        result = self.subprocess_py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('0.75', result.stdout)
+
+    def test_literal_percent_name_resolves_before_unquote(self):
+        (self.notes / 'a%23b.md').write_text('# 百分号\n\n## x\n内容', encoding='utf-8')
+        code = ("import sys; sys.path.insert(0, r'" + str(self.scripts) + "');"
+                "from common import resolve_wikilink;"
+                "print(resolve_wikilink('notes/a%23b', 'notes/x.md', {}, {}, {'notes/a%23b.md'}))")
+        result = self.subprocess_py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("notes/a%23b.md", result.stdout)
+
     def test_health_report_sections_order(self):
         self.assertEqual(self.run_script('embed.py').returncode, 0)
         self.assertEqual(self.run_script('build_graph.py').returncode, 0)

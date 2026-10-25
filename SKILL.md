@@ -21,7 +21,7 @@ description: Initialize a self-maintaining knowledge-base harness on an Obsidian
 
 **默认 = 基础层 + 语义层（本地内置模型），零 API。** LLM 层默认不开：摘要不参与排序（BM25/向量索引都不收 `.meta/summaries`），它只服务"命中列表多一行说明"和"主题综述素材"。
 
-**升级嵌入模型**（例如换 Zhipu / qwen3-embedding 等更高维模型）：改 `EMBED_BASE_URL` + `EMBED_MODEL` → `python .meta/scripts/embed.py --full` 重建向量库。内置模型保证升级前始终有可用嵌入。换模型后建议跑一次 `calibrate_thresholds.py`——默认阈值随后端给出（内置 0.58/0.72/0.62，HTTP 0.70/0.85/0.75），但语料不同仍需校准。
+**升级嵌入模型**（例如换 Zhipu / qwen3-embedding 等更高维模型）：改 `EMBED_BASE_URL` + `EMBED_MODEL` → `python .meta/scripts/embed.py --full` 重建向量库。内置模型保证升级前始终有可用嵌入。换模型后建议跑一次 `calibrate_thresholds.py`——默认阈值随后端给出（内置 0.58/0.72/0.62/0.50，HTTP 0.70/0.85/0.75/0.60），但语料不同仍需校准；样本 <20 对时脚本会回退默认。
 
 **配置变了怎么办**（唯一运维纪律）：模型/维度/分块变化后 `embed.py` 会**拒绝增量并提示** `--full`；`--full` 先写临时表、**全部成功**后才在一条事务里切换——任何一片失败都不切换；旧库保留，但要先把 `EMBED_*` 回退到与库一致的配置才能查询。
 
@@ -216,7 +216,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
 | `extract_office.py` | office 文档（.docx/.xlsx/.pptx/.pdf）纯文本提取 → `.meta/office-extracts/` sidecar；增量按 hash；孤儿清理；老格式登记 `_legacy-formats.md`；**子进程并行**，单文件超过 `OFFICE_EXTRACT_TIMEOUT_S`（默认 120s）即终止跳过并登记 `_timeouts.md` | python-docx/openpyxl/python-pptx/pypdf（缺装时对应格式跳过并提示） | `--full` |
-| `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**默认内置本地模型（fastembed），可切任意 OpenAI 兼容 `/embeddings`**；HTTP 走跨文件线程池、内置走扁平批量推理；先探针后写库；配置变更**拒绝增量并提示 `--full`**，`--full` 先写临时表再原子换表；大文件闸门：超阈值且无 allow 决定的文件硬性跳过（llm_skip 决定同时清除历史向量） | HTTP 端点 或 fastembed | `--full` |
+| `embed.py` | 笔记 + office 提取件 + memory → embeddings.sqlite；**默认内置本地模型（fastembed），可切任意 OpenAI 兼容 `/embeddings`**；HTTP 按 `EMBED_BATCH` 切请求批并发、内置扁平批量；两者都按 `EMBED_FILE_BATCH`/`EMBED_CHUNK_BATCH` 分批并**立即写库**；先探针后写库；配置变更**拒绝增量并提示 `--full`**，`--full` 先写临时表再原子换表；大文件闸门：超阈值且无 allow 决定的文件硬性跳过（llm_skip 决定同时清除历史向量） | HTTP 端点 或 fastembed | `--full` |
 | `summarize.py` | 每篇生成摘要 / tag sidecar；**跨文件并发 API**（LLM 层；`HARNESS_MODE=full` 时由 maintain 调用）；大文件闸门同 embed | DeepSeek | `--full` |
 | `build_index.py` | `.index/manifest.md` + 分类清单 + topics.md（office 文档以 📎 标记纳入） | 本地 | 无参 |
 | `calibrate_thresholds.py` | 只读采样当前嵌入库的相似度分布，输出建议的 `LINKS_SIM_THRESHOLD` / `LINKS_HIGH_THRESHOLD` / `SEMANTIC_THRESHOLD` / `ESCALATION_THRESHOLD`（换模型或换语料后跑一次） | 本地（需 embeddings.sqlite） | `--limit` / `--json` |
