@@ -80,6 +80,7 @@ class GitDerivedTests(unittest.TestCase):
         ignore = (self.vault / '.gitignore').read_text(encoding='utf-8')
         self.assertIn('init-kb-harness: derived artifacts', ignore)
         self.assertIn('.meta/embeddings.sqlite', ignore)
+        self.assertIn('.meta/usage-log.jsonl', ignore)
 
         # file-dates 的时间戳等于该文件最近一次提交
         expected = self.git('log', '-1', '--format=%at', '--', 'notes/a.md').stdout.strip()

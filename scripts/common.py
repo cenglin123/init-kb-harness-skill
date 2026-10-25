@@ -913,6 +913,7 @@ def git_available() -> bool:
 GITIGNORE_BEGIN = '# --- init-kb-harness: derived artifacts (managed) ---'
 GITIGNORE_END = '# --- /init-kb-harness ---'
 DERIVED_GIT_PATHS = (
+    '.meta/usage-log.jsonl',
     '.meta/embeddings.sqlite',
     '.meta/embeddings.sqlite-wal',
     '.meta/embeddings.sqlite-shm',
@@ -1402,18 +1403,47 @@ def rerank_with_llm(query, candidates, top_m=5):
 
 
 # ─── Usage Tracking ──────────────────────────────────────────────────
+# 这些脚本的参数里含用户原文（查询/主题），只记录指纹，不落原文
+_REDACT_ARGV_SCRIPTS = {'ask.py', 'synthesize.py'}
+_USAGE_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _redact_argv(name: str, argv: list) -> tuple:
+    """把含用户原文的参数替换为指纹：返回 (安全 argv, 指纹信息)。"""
+    if name not in _REDACT_ARGV_SCRIPTS:
+        return list(argv), {}
+    flags = [a.split('=', 1)[0] for a in argv if a.startswith('-')]
+    texts = [a for a in argv if not a.startswith('-')]
+    blob = '\x00'.join(texts)
+    return flags, {
+        'query_sha256': hashlib.sha256(blob.encode('utf-8')).hexdigest()[:12] if blob else '',
+        'query_len': len(blob),
+    }
+
+
 def log_script_run():
-    """追加脚本调用记录到 .meta/usage-log.jsonl（静默失败）。"""
+    """追加脚本调用记录到 .meta/usage-log.jsonl（静默失败）。
+
+    ask.py / synthesize.py 的用户原文不落盘（仅 sha256 前缀 + 长度）；日志本身
+    属于派生数据，由 maintain 写入 .gitignore 并移出版本控制。
+    """
     try:
         import json as _json
         from datetime import datetime as _dt
+        name = Path(sys.argv[0]).name
+        argv, redacted = _redact_argv(name, sys.argv[1:])
         entry = _json.dumps({
             "ts": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "kind": "script",
-            "name": Path(sys.argv[0]).name,
-            "argv": sys.argv[1:],
+            "name": name,
+            "argv": argv,
+            **({"redacted": redacted} if redacted else {}),
         }, ensure_ascii=False)
         log_path = VAULT_ROOT / ".meta" / "usage-log.jsonl"
+        # 简单轮转：超过 2MB 只保留最后 1000 行
+        if log_path.exists() and log_path.stat().st_size > _USAGE_LOG_MAX_BYTES:
+            keep = log_path.read_text(encoding='utf-8', errors='replace').splitlines()[-1000:]
+            log_path.write_text('\n'.join(keep) + '\n', encoding='utf-8', newline='\n')
         with open(log_path, "a", encoding="utf-8", newline="\n") as f:
             f.write(entry + "\n")
     except Exception:

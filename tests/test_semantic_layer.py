@@ -456,6 +456,13 @@ class SemanticLayerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("notes/a%23b.md", result.stdout)
 
+    def test_usage_log_redacts_query(self):
+        self.write_env(enabled=False)
+        self.run_script('ask.py', '绝密查询词')
+        log = (self.vault / '.meta' / 'usage-log.jsonl').read_text(encoding='utf-8')
+        self.assertNotIn('绝密查询词', log)
+        self.assertIn('query_sha256', log)
+
     def test_health_report_sections_order(self):
         self.assertEqual(self.run_script('embed.py').returncode, 0)
         self.assertEqual(self.run_script('build_graph.py').returncode, 0)

@@ -29,6 +29,18 @@
 
 ---
 
+## 已知限制
+
+- **阈值**：内置/云端默认值都是启发式（0.58/0.72/0.62/0.50 与 0.70/0.85/0.75/0.60）；换模型或语料后用 `calibrate_thresholds.py` 校准。
+- **校准脚本**：相关/不相关用"顶层目录"代理；单根目录库（`notes/日记`、`notes/复盘`）会退化为"样本不足"，此时沿用默认。`--limit` 是字典序前缀采样，不是随机采样。
+- **含 `#` 的文件名**：sidecar 里写成 `%23` 以保证图谱/`--neighbors` 正确，但 Obsidian 不做 URL 解码，这些链接在 Obsidian 中不可点击。
+- **流式写库的边界**：向量按批驻留，但待更新笔记的正文仍会一次性读入内存；首次增量建库若在写入 `embed_meta` 前中断，下次会要求 `embed.py --full`。
+- **HTTP 并发**：有效并发约 `EMBED_FILE_BATCH / EMBED_BATCH`（默认 8 路）；云端端点仍按 `API_RATE_LIMIT_MS` 全局限速。
+- **usage-log**：`ask.py` / `synthesize.py` 的用户原文只记录 sha256 前缀与长度；日志文件 `.meta/usage-log.jsonl` 已被派生件规则排除出 git，但仍留在磁盘/网盘。
+- **离线套装**：wheel 为 CPython 3.13 / win_amd64；用套装时请固定 3.13。
+
+---
+
 ## Installation
 
 Installation 仅指 Phase 1-3 的机械步骤。Phase 0（体检 + 隐私嗅探 + taxonomy 推断 + 交互式引导）由技能触发，不是手动安装步骤。
