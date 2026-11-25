@@ -4,12 +4,13 @@
 check_plan_status.py — 检查 docs/plans 路径与 frontmatter status 是否一致
 
 规则：
-- docs/plans/active/*.md       -> status: active
-- docs/plans/done/*.md         -> status: done
-- docs/plans/not_planned/*.md  -> status: not_planned
+- docs/plans/active/*.md       -> status: active（兼容 in_progress）
+- docs/plans/completed/*.md    -> status: done（兼容 completed）
+- docs/plans/done/*.md         -> status: done（旧目录兼容）
+- docs/plans/not_planned/*.md  -> status: not_planned（兼容 cancelled）
 
 附加检查（--full 或 --archive-check）：
-- docs/plans/active/ 下所有 - [ ] 均已勾选但 status 仍为 active 的计划，建议归档
+- docs/plans/active/ 下所有 - [ ] 均已勾选但 status 仍为 active/in_progress 的计划，建议归档至 completed/
 
 特例：
 - docs/plans/active/backlog.md 是开放项清单，不是标准 plan，跳过。
@@ -32,10 +33,11 @@ if sys.platform == "win32":
         pass
 
 
-EXPECTED_BY_DIR = {
-    "active": "active",
-    "done": "done",
-    "not_planned": "not_planned",
+EXPECTED_BY_DIR: dict[str, tuple[str, ...]] = {
+    "active": ("active", "in_progress"),
+    "completed": ("done", "completed"),
+    "done": ("done",),
+    "not_planned": ("not_planned", "cancelled"),
 }
 
 EXEMPT_REL_PATHS = {
@@ -71,9 +73,9 @@ def extract_status(text: str) -> str | None:
     return status_match.group(1).strip("'\"")
 
 
-def iter_plan_files(root: Path) -> list[tuple[Path, str]]:
-    """列出需检查的 plan 文件及期望 status。"""
-    items: list[tuple[Path, str]] = []
+def iter_plan_files(root: Path) -> list[tuple[Path, tuple[str, ...]]]:
+    """列出需检查的 plan 文件及允许的 status 集合。"""
+    items: list[tuple[Path, tuple[str, ...]]] = []
     for dirname, expected in EXPECTED_BY_DIR.items():
         plan_dir = root / "docs" / "plans" / dirname
         if not plan_dir.exists():
@@ -88,14 +90,14 @@ def iter_plan_files(root: Path) -> list[tuple[Path, str]]:
 
 def check(root: Path) -> list[Mismatch]:
     mismatches: list[Mismatch] = []
-    for path, expected in iter_plan_files(root):
+    for path, allowed in iter_plan_files(root):
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise RuntimeError(f"无法以 UTF-8 读取 {path}: {exc}") from exc
         actual = extract_status(text)
-        if actual != expected:
-            mismatches.append(Mismatch(path=path, expected=expected, actual=actual))
+        if actual not in allowed:
+            mismatches.append(Mismatch(path=path, expected="/".join(allowed), actual=actual))
     return mismatches
 
 
@@ -120,9 +122,9 @@ def check_archive_ready(root: Path) -> list[Path]:
             text = path.read_text(encoding="utf-8")
         except Exception:
             continue
-        # 只检查 status: active 的计划
+        # 只检查 status 为 active / in_progress 的计划
         status = extract_status(text)
-        if status != "active":
+        if status not in EXPECTED_BY_DIR["active"]:
             continue
         # 找所有 checkbox：- [ ] 和 - [x]
         unchecked = len(re.findall(r"-\s+\[ \]", text))
@@ -139,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--root",
         type=Path,
-        default=vault_root_from_script(),
+        default=None,
         help="vault root；默认自动从脚本位置向上查找。",
     )
     parser.add_argument(
@@ -155,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    root = args.root.resolve()
+    root = (args.root if args.root is not None else vault_root_from_script()).resolve()
     mismatches = check(root)
     archive_ready = check_archive_ready(root) if (args.archive_check or args.full) else []
 
@@ -173,10 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         ok = False
 
     if archive_ready:
-        print("WARNING: 以下 active/ 计划已全部勾选，应归档至 done/：")
+        print("WARNING: 以下 active/ 计划已全部勾选，应归档至 completed/：")
         for p in archive_ready:
             print(f"- {format_rel(p, root)}")
-        print("\n操作：git mv <plan> docs/plans/done/ 并将 status 改为 done。\n")
+        print("\n操作：git mv <plan> docs/plans/completed/ 并将 status 改为 done。\n")
 
     if not mismatches:
         print("OK: docs/plans 路径与 frontmatter status 一致")

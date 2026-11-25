@@ -18,7 +18,7 @@
     {
       "name": "plans-readme-and-archive",
       "type": "path_only",
-      "paths": ["docs/plans/README.md", "docs/plans/done/**", "docs/plans/not_planned/**"],
+      "paths": ["docs/plans/README.md", "docs/plans/completed/**", "docs/plans/done/**", "docs/plans/not_planned/**"],
       "reason": "已完成/未采纳计划禁改 + plans 生命周期合同"
     },
     {

@@ -70,11 +70,11 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 
 ### 可选 worktree 协作桥接
 
-知识库可选择沿用 init-agent-docs 的跨工具任务登记约定。仅在目标是 Git 仓库且用户选择启用时安装或保留；新库把通用 helper 放在 `.meta/scripts/worktree_task.py`，状态登记复用 Git common-dir 下的同一 registry。KB 不复制第二份 runtime，不安装强制 hook，也不要求固定任务分类、宿主专属分支前缀或自动通知。具体动作与参数以 helper 的 `--help` 为准。
+知识库可选择沿用 init-agent-docs 的 Git worktree 隔离与主工作树占用声明约定。仅在目标是 Git 仓库且用户选择启用时安装或保留；新库把通用 helper 放在 `.meta/scripts/worktree_task.py`，提供 8 个动作（`create` / `check` / `integrate` / `cleanup` / `list` / `claim-main` / `release-main` / `main-claim`）。任务身份仅来自 Git worktree 列表与 `task/*` 分支名；Git common-dir 下只存共享原子锁与 `main-claim.json`。KB 不复制第二份 runtime，不安装强制 hook，也不要求固定任务分类、宿主专属分支前缀或自动通知。具体动作与参数以 helper 的 `--help` 为准。
 
-不启用、没有 Git，或当前任务只是只读检索/评审时，不创建 task worktree 或登记状态。任务显示名由用户/agent 在创建时输入一次，后续沿用 helper 派生的稳定 ID、分支和目录；恢复任务按 ID、owner 与 generation 定位，不按最近修改时间猜测。
+不启用、没有 Git，或当前任务只是只读检索/评审时，不创建 task worktree 或写入占用状态。创建 task worktree 时 `--name` 与 `--owner` 成对传入或同时省略，分支名（`task/<id>[-<slug>]`）与目录（`wt-<id>[-<slug>]`）由 helper 稳定派生；主工作树写入前用 `claim-main --owner ...` 声明占用，整合前用 `release-main --owner ...` 释放，`integrate` 仅在无活动 `main-claim` 且通过快进校验时合入。
 
-协作登记是跨工具共享的软约定。agent 可先做一致性检查并在身份或任务状态无法对应时拒绝继续，但这不构成系统安全边界，不能拦截直接文件编辑、手工 Git、旧版 CLI、其他 clone 或任意 GUI 操作。owner 字段只是声明，不是身份认证；内容摘要也不证明语义正确。registry 只在同一 Git common-dir 的 linked worktree 间共享，不会自动同步到另一 clone 或设备。主从权限始终优先于 task owner：从机可只读列出、检查或评审任务；从机不得创建 task worktree、写 registry 或执行 Git 写命令。worktree 只隔离 Git 文件，不隔离共享数据库、派生维护和部署；需要这些写入时由主机在主工作树整合并统一执行。
+此工具提供本地 Git 隔离与占用硬护栏，但不构成系统安全边界：不会拦截直接文件编辑、手工 Git、其他 clone 或任意 GUI 操作。`owner` 字段只是声明，不是身份认证；`main-claim` 状态仅在同一 Git common-dir 的 linked worktree 间共享，不会自动同步到另一 clone 或设备。主从权限始终优先于 task owner：从机仅可只读执行 `list` / `check` / `main-claim`；从机不得创建 task worktree、修改 `main-claim` 或执行 Git 写命令。worktree 只隔离 Git 文件，不隔离共享数据库、派生维护和部署；需要这些写入时由主机在主工作树整合并统一执行。
 
 
 ---
@@ -137,7 +137,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
    | ② | taxonomy | TAXONOMY.md 草案要点 | a) 接受 b) 用户口述调整、agent 改后再示 c) 留 draft 以后再定 |
    | ③ | 安装模式与增强层 | 仓库画像 + rubric 提示 + 能力对照（见"安装模式"节）；**只问用户现有条件**，不催配 key | a) **默认（推荐）**：内置本地嵌入 + BM25 + 图谱，零 API b) 换更高质量嵌入：本机已有 Ollama / 任意 OpenAI 兼容端点，或云端（换后重建向量库）c) 加 LLM 层：DeepSeek 摘要/精排（需 key，可选）d) 极小仓库先攒内容、暂不 bootstrap |
    | ④ | 增强层配置（**仅决策点 ③ 选了 b/c 时进行；默认无需任何配置**） | 语义层：`EMBED_BASE_URL` + `EMBED_MODEL`（本地端点无需 key）；LLM 层：`DEEPSEEK_API_KEY`；可选：PRIMARY_HOST | a) 现在提供（贴入对话或用户自行编辑 .env）b) 稍后自填（骨架照装、对应层保持关闭，不影响其余能力） |
-   | ⑤ | worktree 协作桥接（**仅目标是 Git 仓库时询问**） | 说明跨工具任务登记、隔离和范围协调用途 | a) 启用：复用 init-agent-docs helper，按需为复杂/并行任务建 task worktree b) 不启用：保留普通 agent 工作流，不安装 helper；非 Git 仓库自动记为不适用 |
+   | ⑤ | worktree 协作桥接（**仅目标是 Git 仓库时询问**） | 说明 Git worktree 隔离与主工作树占用声明用途 | a) 启用：复用 init-agent-docs helper，按需为复杂/并行任务建 task worktree b) 不启用：保留普通 agent 工作流，不安装 helper；非 Git 仓库自动记为不适用 |
 
    每步的用户选择**记录进 `kb-bootstrap-decisions.md`**（定位：**执行记录**——记下每步选项、选择结果）。
 6. **所有适用决策点都有结果 → 直接进入 Phase 1**。中断后重触发时沿用 `kb-bootstrap-decisions.md` 中已确认的选择；只在用户明确要求重选时才重新询问，不重复确认已有协作桥接选择。
@@ -184,7 +184,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 - 建 `.meta/converge/{active,done}/` + README charter（来自 `refs/converge-readme-template.md`）——**只此一个治理目录**，不建 deliberations/audit
 - 生成 `.meta/governed-files.txt`（来自 `refs/governed-files-template.txt`，按目标仓库实际治理边界增删）
 - `.env` 设 `CONVERGE_DIR=.meta/converge`（converge SKILL 产物路径绑定；hook 拦截误落 `.converge/`）
-- 治理叙事统一为单一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后 done`；治理文档改动走 ultraverge（详见 `refs/governance-multi-axis.md`）
+- 治理叙事统一为单一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后归档 docs/plans/completed/（status: done）`；治理文档改动走 ultraverge（详见 `refs/governance-multi-axis.md`）
 
 ### Bootstrap 完成判定
 
@@ -247,7 +247,7 @@ Phase 1 开始前检测目标仓库：已有 `docs/STRUCTURE.md`、`docs/plans/`
 | `host_guard.py` | 宿主护栏动态门禁（**Phase 1.5 选用**，不配 hook 则为无害闲置）：pre-tool 判定（隐私读禁/从机写禁/编辑重定向）、prompt 触发词提醒、compact-context 注入文本、simulate-host dry-run；策略源 `.meta/rules/host-write-policy.json` |
 | `inbox_scan.py` | 收件箱扫描 + LLM 归类建议（health_report 调用） |
 | `changelog_append.py` | 旧库兼容追加器；已有 agent-docs changelog.py 时不部署 |
-| `check_plan_status.py` | docs/plans 路径与 frontmatter status 一致性（pre-commit 调用） |
+| `check_plan_status.py` | docs/plans 路径（`active/`、`completed/`、`not_planned/`，兼容 `done/`）与 frontmatter status 一致性（pre-commit 调用） |
 
 > maintain.py 的 workflow frequency 步骤依赖 `search_sessions.py`（vault 特化脚本，bundle 不含）——缺失时自动跳过并告警。
 

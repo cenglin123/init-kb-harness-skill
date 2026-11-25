@@ -90,13 +90,13 @@ Vault/
 <!-- optional-worktree-bridge:start -->
 ### 可选 worktree 协作约定
 
-仅当本库位于 Git 仓库且用户选择启用时，复用 init-agent-docs 提供的 `.meta/scripts/worktree_task.py` 与 Git common-dir registry。若未启用或没有 Git，不安装此 helper；只读检索/评审任务不创建 task worktree 或登记任务。创建时显示名只输入一次；ID、分支和目录由 helper 稳定派生，续接按 ID、owner、generation 定位。动作和参数以 helper 的 `--help` 为准。
+仅当本库位于 Git 仓库且用户选择启用时，复用 init-agent-docs 提供的 `.meta/scripts/worktree_task.py`（8 个动作：`create` / `check` / `integrate` / `cleanup` / `list` / `claim-main` / `release-main` / `main-claim`）。若未启用或没有 Git，不安装此 helper；只读检索/评审任务不创建 task worktree 或写入占用状态。任务身份仅来自 Git worktree 列表与 `task/*` 分支名；Git common-dir 下只存共享原子锁与 `main-claim.json`。动作和参数以 helper 的 `--help` 为准。
 
-对跨上下文或并行任务，开始写入前主动入场：先 `list` 查看未关闭任务及范围；用 `create --name ... --owner ...` 创建并领取，或用 `resume <id> --owner ... --generation ...` 恢复；用 `intent` 登记目标、非目标、路径范围和已提交 SHA 依赖。`review <id>` 检查重叠与依赖；受影响任务需双方记录一致的 `coordinate` 结论，再把 review 返回的摘要传给 `admit <id> --review-digest ...`。每次开始或恢复文件写入前运行 `check <id> --owner ... --generation ... --write`；范围变化时更新 intent 并重新 review/coordinate/admit。完整参数见 helper `--help`。这些是 agent 主动执行的流程，不会自动联系其他任务或代替用户授权。
+并行或独立写入任务主动隔离工作树：先 `list` 查看活跃 `task/*` worktree 与主工作树占用状态；主工作树写入前用 `claim-main --owner <owner>` 声明占用（TTL 默认 180 分钟，同 owner 可续期，他人活动占用不可强夺），收工或整合前 `release-main --owner <owner>`；分支任务用 `create [--name <显示名> --owner <owner>] [--base <commit-sha>]` 创建独立分支与目录，用 `check <id>` 只读查看 clean、ahead/behind 与合入状态；验收通过且无活动 `main-claim` 后由主控方依次执行 `integrate <id>`（精确 SHA 快进合入）与 `cleanup <id>`（校验 clean、已合入且无未跟踪或 ignored 数据后移除 worktree 与分支）。
 
-此约定是跨工具的 agent 工作流程，不是系统安全边界。agent 可在 task/owner/generation 不一致时停止并要求重新核对；这不能拦截直接文件编辑、手工 Git、旧版 CLI、其他 clone 或任意 GUI 操作。owner 字段只是声明，不是身份认证；内容摘要也不证明语义正确。registry 仅在同一 Git common-dir 的 linked worktree 间共享，不自动同步到另一 clone 或设备。此流程不要求 forced hook、固定分类、宿主专属分支前缀或自动通知。
+此工具提供本地 Git 隔离与占用硬护栏，不是系统安全边界：不能拦截直接文件编辑、手工 Git、其他 clone 或任意 GUI 操作。`owner` 字段只是声明，不是身份认证；`main-claim` 状态仅在同一 Git common-dir 的 linked worktree 间共享，不自动同步到另一 clone 或设备。此流程不要求强制 hook、固定任务分类、宿主专属分支前缀或自动通知。
 
-`.env:PRIMARY_HOST` 主从权限优先于 task owner。从机可以只读 list/check/review；不得创建 task worktree、写 registry 或执行 Git 写命令。worktree 不隔离共享数据库、派生维护或部署；需要共享派生状态时，由主机在主工作树整合后统筹写入。
+`.env:PRIMARY_HOST` 主从权限优先于 task owner。从机仅可只读执行 `list` / `check` / `main-claim`；不得创建 task worktree、修改 `main-claim` 或执行 Git 写命令。worktree 不隔离共享数据库、派生维护或部署；需要共享派生状态时，由主机在主工作树整合后统筹写入。
 <!-- optional-worktree-bridge:end -->
 
 ### 第 0 步 · 环境自检
@@ -152,7 +152,7 @@ python .meta/scripts/semantic_lint.py --deep    # 语义质量深检（含矛盾
 
 ## 治理（Phase 3）
 
-计划质量控制走单一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后 done`。机制权威源 = 全局 converge SKILL；本地路径绑定见 `.meta/converge/README.md`。治理文档机械边界 = `.meta/governed-files.txt`。
+计划质量控制走单一 plan 生命周期：`起草 plan → converge 收敛 → 按授权执行 → fresh verifier 验收 → 用户确认后归档 docs/plans/completed/（status: done）`。机制权威源 = 全局 converge SKILL；本地路径绑定见 `.meta/converge/README.md`。治理文档机械边界 = `.meta/governed-files.txt`。
 
 ---
 
