@@ -25,9 +25,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
-    VAULT_ROOT, scan_notes, scan_office_extracts, content_hash, rel_path,
+    VAULT_ROOT, scan_notes, scan_office_extracts, rel_path,
     meta_mirror, ensure_parent, find_all_wikilinks, find_all_mdlinks,
-    ENV, threshold_defaults, log_script_run,
+    ENV, threshold_defaults, log_script_run, ScanCache,
 )
 from embed import blob_to_embedding, read_meta
 
@@ -142,6 +142,56 @@ def cleanup_orphans(valid_rels: set) -> int:
     return removed
 
 
+SIM_BLOCK_SIZE = 512
+
+
+def compute_top_k_neighbors(
+    mat: np.ndarray,
+    query_indices: list,
+    paths: list,
+    top_k: int = TOP_K,
+    threshold: float = RELATED_THRESHOLD,
+    block_size: int = SIM_BLOCK_SIZE,
+) -> list:
+    """向量化分块矩阵乘 + np.argpartition 计算每个 query_index 的 top-K 语义近邻。
+
+    mat: (N, D) L2 归一化矩阵
+    query_indices: 待计算的行索引列表
+    返回与 query_indices 等长的列表，每项为 [(neighbor_path, score), ...]，
+    排除自身，按 score 降序，仅保留 score >= threshold，最多 top_k 条。
+    """
+    n = mat.shape[0]
+    if not query_indices or n <= 1:
+        return [[] for _ in query_indices]
+
+    results = []
+    k_sel = min(top_k, n - 1)
+    mat_t = mat.T
+
+    for start in range(0, len(query_indices), block_size):
+        chunk_idx = query_indices[start:start + block_size]
+        sim_block = mat[chunk_idx] @ mat_t
+        for row_i, src_idx in enumerate(chunk_idx):
+            row = sim_block[row_i]
+            row[src_idx] = -np.inf
+            if k_sel <= 0:
+                results.append([])
+                continue
+            cand = np.argpartition(-row, k_sel - 1)[:k_sel]
+            cand_scores = row[cand]
+            order = np.lexsort((cand, -cand_scores))
+            related = []
+            for pos in order:
+                j = int(cand[pos])
+                if j == src_idx:
+                    continue
+                s = float(cand_scores[pos])
+                if s >= threshold:
+                    related.append((paths[j], s))
+            results.append(related)
+    return results
+
+
 def main(full=False):
     if not DB_PATH.exists():
         print("  语义层未建立（无 embeddings.sqlite），跳过。")
@@ -169,6 +219,7 @@ def main(full=False):
     mat = np.stack([np.mean(by_path[p], axis=0) for p in paths])
     mat /= (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12)
 
+    scan_cache = ScanCache()
     notes = list(scan_notes()) + list(scan_office_extracts())
     todo = []
     for md in notes:
@@ -180,31 +231,29 @@ def main(full=False):
                 p.unlink()
             continue
         try:
+            h = scan_cache.get_content_hash(md, rel)
+        except Exception as e:
+            print(f"  [skip] 无法读取: {rel} ({e})")
+            continue
+        if not full and already_up_to_date(rel, h, model):
+            continue
+        try:
             content = md.read_text(encoding='utf-8')
         except Exception as e:
             print(f"  [skip] 无法读取: {rel} ({e})")
             continue
-        h = content_hash(md)
-        if not full and already_up_to_date(rel, h, model):
-            continue
         todo.append((md, rel, h, content))
+    scan_cache.save()
 
-    for i, (md, rel, h, content) in enumerate(todo, 1):
-        idx = index[rel]
-        sims = mat @ mat[idx]
-        order = np.argsort(-sims)[:TOP_K + 1]
-        related = []
-        for j in order:
-            if j == idx:
-                continue
-            s = float(sims[j])
-            if s >= RELATED_THRESHOLD:
-                related.append((paths[j], s))
-            if len(related) >= TOP_K:
-                break
-        write_links(rel, h, related, extract_link_targets(content), model)
-        if i % 50 == 0 or i == len(todo):
-            print(f"  [{i}/{len(todo)}] ...")
+    if todo:
+        query_indices = [index[rel] for _, rel, _, _ in todo]
+        all_related = compute_top_k_neighbors(
+            mat, query_indices, paths, top_k=TOP_K, threshold=RELATED_THRESHOLD
+        )
+        for i, ((md, rel, h, content), related) in enumerate(zip(todo, all_related), 1):
+            write_links(rel, h, related, extract_link_targets(content), model)
+            if i % 50 == 0 or i == len(todo):
+                print(f"  [{i}/{len(todo)}] ...")
 
     current = {rel_path(md) for md in notes}
     removed = cleanup_orphans(current)

@@ -18,9 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
-    VAULT_ROOT, scan_notes, scan_office_extracts, content_hash, rel_path,
+    VAULT_ROOT, scan_notes, scan_office_extracts, rel_path,
     meta_mirror, ensure_parent, DeepSeekClient,
-    MAINTAIN_CONCURRENCY, llm_pipeline_check, llm_enabled,
+    MAINTAIN_CONCURRENCY, llm_pipeline_check, llm_enabled, ScanCache,
 )
 
 VOCAB_PATH = VAULT_ROOT / '.meta' / 'tag-vocab.json'
@@ -129,6 +129,7 @@ def main(full=False):
     # office 提取 sidecar 与普通笔记同等处理。其 summaries/tags 镜像会落在
     # .meta/summaries/.meta/office-extracts/... —— 嵌套是有意的：写读两侧统一走
     # meta_mirror，且与 check_sidecar_sources 的 source 契约（镜像相对路径）一致。
+    scan_cache = ScanCache()
     notes = []
     for md in list(scan_notes()) + list(scan_office_extracts()):
         rel = rel_path(md)
@@ -138,8 +139,13 @@ def main(full=False):
             size_mb = md.stat().st_size / 1048576
             print(f"  [挂起·{reason}] {rel}（{size_mb:.2f} MB 超阈值）——本轮不生成摘要/tag/关联，待用户决定")
             continue
-        h = content_hash(md)
+        try:
+            h = scan_cache.get_content_hash(md, rel)
+        except Exception as e:
+            print(f"    [skip] {rel}: {e}")
+            continue
         notes.append((md, rel, h))
+    scan_cache.save()
     print(f"  共 {len(notes)} 篇笔记（含 office 提取）")
 
     # 第一轮：摘要 + tag（合并为一次 API 调用；跨文件并发）

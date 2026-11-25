@@ -18,6 +18,7 @@ import json
 import posixpath
 import hashlib
 import subprocess
+import tempfile
 import time
 import socket
 from datetime import datetime
@@ -375,13 +376,137 @@ def refresh_large_file_report() -> int:
     LARGE_FILE_PENDING_MD.write_text('\n'.join(lines), encoding='utf-8')
     return len(pending)
 
-# ─── 哈希 ──────────────────────────────────────────────────────────────────
-def content_hash(path: Path) -> str:
+# ─── 哈希与共享扫描缓存 ────────────────────────────────────────────────────
+SCAN_CACHE_PATH = VAULT_ROOT / '.meta' / 'scan-cache.json'
+
+
+def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, 'rb') as f:
         while chunk := f.read(65536):
             h.update(chunk)
-    return h.hexdigest()[:16]
+    return h.hexdigest()
+
+
+def content_hash(path: Path) -> str:
+    return _sha256_file(path)[:16]
+
+
+class ScanCache:
+    """共享文件扫描哈希缓存（.meta/scan-cache.json）。
+
+    按 vault 相对路径缓存 {size, mtime_ns, sha256}（完整 64 位 SHA-256 hex）。
+    同时校验 size 与 mtime_ns 才复用缓存；缓存缺失或损坏时静默降级；
+    save() 时清理失效条目并原子写入（临时文件 + os.replace）。
+    """
+
+    def __init__(self, cache_path: Optional[Path] = None, vault_root: Optional[Path] = None):
+        self.vault_root = vault_root or VAULT_ROOT
+        self.cache_path = cache_path or (self.vault_root / '.meta' / 'scan-cache.json')
+        self.entries: dict = {}
+        self._dirty = False
+        self._load()
+
+    def _load(self):
+        if not self.cache_path.exists():
+            return
+        try:
+            raw = json.loads(self.cache_path.read_text(encoding='utf-8'))
+            if not isinstance(raw, dict):
+                self._dirty = True
+                return
+            valid = {}
+            for k, v in raw.items():
+                if (isinstance(k, str) and isinstance(v, dict)
+                        and isinstance(v.get('size'), int)
+                        and isinstance(v.get('mtime_ns'), int)
+                        and isinstance(v.get('sha256'), str)
+                        and len(v['sha256']) == 64):
+                    valid[k] = {
+                        'size': v['size'],
+                        'mtime_ns': v['mtime_ns'],
+                        'sha256': v['sha256'],
+                    }
+                else:
+                    self._dirty = True
+            self.entries = valid
+        except Exception:
+            self.entries = {}
+            self._dirty = True
+
+    def _rel(self, path: Path, rel: Optional[str] = None) -> str:
+        if rel is not None:
+            return rel.replace('\\', '/')
+        try:
+            return str(path.relative_to(self.vault_root)).replace('\\', '/')
+        except ValueError:
+            return str(path).replace('\\', '/')
+
+    def get_sha256(self, path: Path, rel: Optional[str] = None) -> str:
+        """返回文件完整 64 位 SHA-256 hex；size 与 mtime_ns 均命中时免读盘。"""
+        key = self._rel(path, rel)
+        st = path.stat()
+        size = st.st_size
+        mtime_ns = st.st_mtime_ns
+        cached = self.entries.get(key)
+        if (cached is not None
+                and cached['size'] == size
+                and cached['mtime_ns'] == mtime_ns):
+            return cached['sha256']
+        digest = _sha256_file(path)
+        self.entries[key] = {
+            'size': size,
+            'mtime_ns': mtime_ns,
+            'sha256': digest,
+        }
+        self._dirty = True
+        return digest
+
+    def get_content_hash(self, path: Path, rel: Optional[str] = None) -> str:
+        """返回与 content_hash() 一致的 16 位 SHA-256 前缀。"""
+        return self.get_sha256(path, rel)[:16]
+
+    def prune(self, valid_rels=None) -> int:
+        """清理过期条目。传入 valid_rels 时仅保留集合内路径；否则移除磁盘已不存在的路径。"""
+        before = len(self.entries)
+        if valid_rels is not None:
+            keep = {r.replace('\\', '/') for r in valid_rels}
+            self.entries = {k: v for k, v in self.entries.items() if k in keep}
+        else:
+            self.entries = {
+                k: v for k, v in self.entries.items()
+                if (self.vault_root / k).is_file()
+            }
+        removed = before - len(self.entries)
+        if removed:
+            self._dirty = True
+        return removed
+
+    def save(self, valid_rels=None) -> bool:
+        """清理过期条目并原子写回缓存（fail-soft，不抛异常）。"""
+        try:
+            self.prune(valid_rels=valid_rels)
+            if not self._dirty and self.cache_path.exists():
+                return True
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                dir=self.cache_path.parent,
+                prefix=f'.{self.cache_path.name}.',
+                suffix='.tmp',
+                delete=False,
+            ) as tmp:
+                temp_path = Path(tmp.name)
+                json.dump(self.entries, tmp, ensure_ascii=False, separators=(',', ':'))
+            try:
+                os.replace(temp_path, self.cache_path)
+                self._dirty = False
+                return True
+            finally:
+                temp_path.unlink(missing_ok=True)
+        except Exception:
+            return False
 
 # ─── 路径镜像 ──────────────────────────────────────────────────────────────
 def meta_mirror(note_path: Path, subdir: str) -> Path:
@@ -914,6 +1039,7 @@ GITIGNORE_BEGIN = '# --- init-kb-harness: derived artifacts (managed) ---'
 GITIGNORE_END = '# --- /init-kb-harness ---'
 DERIVED_GIT_PATHS = (
     '.meta/usage-log.jsonl',
+    '.meta/scan-cache.json',
     '.meta/embeddings.sqlite',
     '.meta/embeddings.sqlite-wal',
     '.meta/embeddings.sqlite-shm',

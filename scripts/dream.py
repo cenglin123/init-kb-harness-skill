@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, git_available, git
+from common import VAULT_ROOT, git_available, git, git_last_dates
 
 # ---------------------------------------------------------------------------
 # 阈值常量（权威源：.meta/memory/MEMORY.md 分层半衰期表；改表时同步这里）
@@ -64,20 +64,23 @@ def days_since(dt):
     return (datetime.now() - dt).days
 
 
-def git_last_modified(file_rel_path):
-    """获取文件最后一次 git 修改日期（排除当前未提交的修改），失败返回 None"""
+def _ts_to_date(ts):
+    """unix 时间戳转午夜 naive datetime，失败返回 None"""
+    if ts is None:
+        return None
     try:
-        result = subprocess.run(
-            ['git', 'log', '-1', '--format=%aI', '--', file_rel_path],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(VAULT_ROOT),
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return parse_date(result.stdout.strip()[:10])
+        return datetime.fromtimestamp(ts).replace(hour=0, minute=0, second=0, microsecond=0)
     except Exception:
-        pass
-    return None
+        return None
+
+
+def git_last_modified(file_rel_path, git_dates=None):
+    """获取文件最后一次 git 修改日期（排除当前未提交的修改），失败返回 None"""
+    rel = file_rel_path.replace('\\', '/')
+    if git_dates is not None:
+        return _ts_to_date(git_dates.get(rel))
+    dates = git_last_dates([rel])
+    return _ts_to_date(dates.get(rel))
 
 
 def file_mtime_date(file_path):
@@ -121,7 +124,7 @@ def channel_a_workflow(wf_file):
         return ('ACTIVE', None, None)
 
 
-def channel_b_feedback(fb_file):
+def channel_b_feedback(fb_file, git_dates=None):
     """通道 B：feedback 记忆"""
     post = try_load_frontmatter(fb_file)
     liveness = get_field(post, 'liveness', 'active')
@@ -133,7 +136,7 @@ def channel_b_feedback(fb_file):
     # 复用已有 git_last_modified()（channel_c_project 在用）。只补日期让衰减判定能跑，不虚增 confirmed_count（git 修改 ≠ 确认有效）。
     if last_confirmed is None:
         rel = str(fb_file.relative_to(VAULT_ROOT)).replace('\\', '/')
-        git_lc = git_last_modified(rel)
+        git_lc = git_last_modified(rel, git_dates=git_dates)
         if git_lc is not None:
             last_confirmed = git_lc
             ds = days_since(last_confirmed)
@@ -160,7 +163,7 @@ def channel_b_feedback(fb_file):
         return ('ACTIVE', None, None)
 
 
-def channel_c_project(proj_file):
+def channel_c_project(proj_file, git_dates=None):
     """通道 C：project 记忆"""
     post = try_load_frontmatter(proj_file)
     status = get_field(post, 'status', 'active')
@@ -174,7 +177,7 @@ def channel_c_project(proj_file):
     if completed_at is None:
         # git log last modified
         rel = str(proj_file.relative_to(VAULT_ROOT)).replace('\\', '/')
-        completed_at = git_last_modified(rel)
+        completed_at = git_last_modified(rel, git_dates=git_dates)
     if completed_at is None:
         completed_at = file_mtime_date(proj_file)
 
@@ -201,16 +204,21 @@ def channel_d_reference(ref_file):
 # 唤醒检测
 # ---------------------------------------------------------------------------
 
-def detect_wake():
+def detect_wake(git_dates=None):
     """扫描 .archive/，检测是否有被修改过的归档文件（排除当前 maintain 提交）"""
     archive_dir = VAULT_ROOT / '.meta' / 'memory' / '.archive'
     if not archive_dir.exists():
         return []
 
+    rels = [str(f.relative_to(VAULT_ROOT)).replace('\\', '/') for f in archive_dir.rglob('*.md')]
+    if not rels:
+        return []
+    if git_dates is None:
+        git_dates = git_last_dates(rels)
+
     wakes = []
-    for f in archive_dir.rglob('*.md'):
-        rel = str(f.relative_to(VAULT_ROOT)).replace('\\', '/')
-        dt = git_last_modified(rel)
+    for rel in rels:
+        dt = _ts_to_date(git_dates.get(rel))
         if dt is not None:
             wakes.append((rel, dt))
     return wakes
@@ -378,7 +386,11 @@ def main(full=False):
     }
     USER_DIRS = {'user'}  # user/ 为用户画像目录，不参与衰减
 
-    for md_file in memory_root.rglob('*.md'):
+    all_memory_files = list(memory_root.rglob('*.md')) if memory_root.exists() else []
+    all_memory_rels = [str(f.relative_to(VAULT_ROOT)).replace('\\', '/') for f in all_memory_files]
+    git_dates = git_last_dates(all_memory_rels) if all_memory_rels else {}
+
+    for md_file in all_memory_files:
         if md_file.name == 'MEMORY.md':
             continue
         parts = md_file.relative_to(memory_root).parts
@@ -395,7 +407,10 @@ def main(full=False):
 
         if mem_type and mem_type in CHANNEL_MAP:
             channel_id, channel_fn, type_label = CHANNEL_MAP[mem_type]
-            signal, reason, suggestion = channel_fn(md_file)
+            if channel_id in ('channel_b', 'channel_c'):
+                signal, reason, suggestion = channel_fn(md_file, git_dates=git_dates)
+            else:
+                signal, reason, suggestion = channel_fn(md_file)
             entry = {'file': str(md_file.relative_to(VAULT_ROOT)).replace('\\', '/'),
                      'type': type_label, 'signal': signal, 'reason': reason}
             if channel_id == 'channel_a':
@@ -452,7 +467,7 @@ def main(full=False):
             })
 
     # 唤醒检测
-    wakes = detect_wake()
+    wakes = detect_wake(git_dates=git_dates)
 
     # 生成报告
     report_path = generate_report(results, wakes)

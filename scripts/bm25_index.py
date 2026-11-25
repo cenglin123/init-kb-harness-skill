@@ -28,7 +28,7 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import VAULT_ROOT, scan_indexable_notes, rel_path
+from common import VAULT_ROOT, scan_indexable_notes, rel_path, ScanCache
 from embed import chunk_text
 
 # v2.1：序列化用 pickle（gzip 压缩）。索引/缓存是纯基础类型结构，json 逐键编码
@@ -120,27 +120,34 @@ def build_index(rebuild=False):
     """扫描 vault 语料构建 BM25 索引。rebuild=True 时忽略缓存全量重算。"""
     start = datetime.now()
 
-    # ── 1. 读语料并计算内容 hash ──
-    corpus = []  # [(rel_path, content)]
+    scan_cache = ScanCache()
+    cache = {} if rebuild else _load_cache()
+
+    # ── 1 & 2. 借助共享 scan-cache 分类：缓存命中免读正文 / 需重算 ──
+    corpus_rels_order = []  # [rel, ...] 保持扫描顺序
+    cached_docs = {}        # rel -> cache entry（hash 命中）
+    pending = []            # [(rel, content, h)] 需要分词
     for md in scan_indexable_notes(scope='all'):
         rel = rel_path(md)
         try:
-            corpus.append((rel, md.read_text(encoding='utf-8')))
+            h = scan_cache.get_sha256(md, rel)
         except Exception as e:
             print(f"  [skip] 无法读取: {rel} ({e})", file=sys.stderr)
-
-    cache = {} if rebuild else _load_cache()
-
-    # ── 2. 分类：缓存命中 / 需重算 ──
-    cached_docs = {}   # rel -> cache entry（hash 命中）
-    pending = []       # [(rel, content)] 需要分词
-    for rel, content in corpus:
-        h = hashlib.sha256(content.encode('utf-8')).hexdigest()
+            continue
         entry = cache.get(rel)
-        if entry and entry.get('hash') == h:
+        if not rebuild and entry and entry.get('hash') == h:
             cached_docs[rel] = entry
+            corpus_rels_order.append(rel)
         else:
+            try:
+                content = md.read_text(encoding='utf-8')
+            except Exception as e:
+                print(f"  [skip] 无法读取: {rel} ({e})", file=sys.stderr)
+                continue
             pending.append((rel, content, h))
+            corpus_rels_order.append(rel)
+
+    scan_cache.save()
 
     # ── 3. 对待算文件分块 + 分词（文件数达标时并行） ──
     chunks_by_rel = {}  # rel -> [[chunk_idx, doc_len, {term: freq}], ...]
@@ -172,11 +179,11 @@ def build_index(rebuild=False):
             cache[rel] = {'hash': h, 'chunks': chunks_payload}
 
     # ── 4. 合并（缓存命中 + 新算），组装倒排索引 ──
-    corpus_rels = {rel for rel, _ in corpus}
+    corpus_rels = set(corpus_rels_order)
     cache = {rel: cache[rel] for rel in cache if rel in corpus_rels}  # 清理已删除文件的缓存残留
 
     def iter_doc_chunks():
-        for rel, _ in corpus:
+        for rel in corpus_rels_order:
             entry = cached_docs.get(rel)
             if entry is not None:
                 for ch in entry['chunks']:
@@ -243,10 +250,24 @@ def build_index(rebuild=False):
           f"（复用缓存 {reused}，重新分词 {recomputed}）")
 
 
+_INDEX_CACHE = {}  # (resolved_path_str, mtime_ns, size) -> index dict
+
+
 def _load_index():
     if not BM25_INDEX_PATH.exists():
         print("错误：bm25_index.pkl.gz 不存在，请先运行 --build", file=sys.stderr)
         return None
+    try:
+        st = BM25_INDEX_PATH.stat()
+        cache_key = (str(BM25_INDEX_PATH.resolve()), st.st_mtime_ns, st.st_size)
+    except OSError as e:
+        print(f"错误：索引读取失败（{e}），请运行 --build 重建", file=sys.stderr)
+        return None
+
+    cached = _INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         with gzip.open(BM25_INDEX_PATH, 'rb') as f:
             index = pickle.load(f)
@@ -256,6 +277,11 @@ def _load_index():
     if index.get('index_version') != INDEX_VERSION:
         print("错误：索引为旧版本格式，请运行 --build 重建（增量缓存会自动迁移）", file=sys.stderr)
         return None
+
+    path_str = cache_key[0]
+    for old_key in [k for k in _INDEX_CACHE if k[0] == path_str]:
+        _INDEX_CACHE.pop(old_key, None)
+    _INDEX_CACHE[cache_key] = index
     return index
 
 
