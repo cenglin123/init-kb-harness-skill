@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_indexable_notes, rel_path, content_hash,
-    meta_mirror, git, git_available
+    meta_mirror, git, git_available, is_primary_host
 )
 
 DB_PATH = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
@@ -165,6 +165,10 @@ def find_hash_matches(sqlite_hashes, fs_hashes, exclude_new=None):
 
 
 def main():
+    if not is_primary_host():
+        print("FATAL: this script must run on PRIMARY_HOST", file=sys.stderr)
+        return 1
+
     if not DB_PATH.exists():
         print("  embeddings.sqlite 不存在，跳过重命名检测")
         return 0
@@ -225,4 +229,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # --- host guard ---
+    if not is_primary_host():
+        print("FATAL: this script must run on PRIMARY_HOST", file=sys.stderr)
+        sys.exit(1)
+    # --- /host guard ---
     sys.exit(main())

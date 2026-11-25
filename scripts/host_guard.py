@@ -299,10 +299,49 @@ def output_json(obj: dict) -> None:
 # ─── pre-tool 判定逻辑 ────────────────────────────────────────────────────
 
 
+def _extract_privacy_prefixes(
+    privacy_dirs: list[str],
+    privacy_prefixes: list[str] | None = None,
+) -> list[str]:
+    """从策略配置提取用于 Bash 命令检查的隐私目录前缀列表。"""
+    prefixes: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        if not isinstance(raw, str):
+            return
+        s = raw.strip().replace("\\", "/")
+        while s.startswith("./"):
+            s = s[2:]
+        s = s.strip("/")
+        if s and s not in seen:
+            seen.add(s)
+            prefixes.append(s)
+
+    if privacy_prefixes:
+        for p in privacy_prefixes:
+            _add(p)
+
+    for pattern in privacy_dirs:
+        if not isinstance(pattern, str):
+            continue
+        p = pattern.strip().replace("\\", "/")
+        while p.startswith("./"):
+            p = p[2:]
+        # 截取首个 glob 通配符之前的前缀，如 "private/**" -> "private"，"secret*/**" -> "secret"
+        wildcard_pos = [idx for ch in ("*", "?", "[") if (idx := p.find(ch)) != -1]
+        if wildcard_pos:
+            p = p[:min(wildcard_pos)]
+        _add(p)
+
+    return prefixes
+
+
 def _check_privacy(
     paths: list[str],
     privacy_dirs: list[str],
     tool_name: str,
+    privacy_prefixes: list[str] | None = None,
 ) -> dict | None:
     """P0 隐私检查。命中则返回 deny 输出，否则 None。"""
     tn = _norm_tool_name(tool_name)
@@ -311,12 +350,13 @@ def _check_privacy(
     if tn in _GLOB_TOOLS:
         return None
 
-    # Bash 命令包含隐私目录前缀
+    # Bash 命令包含隐私目录前缀（从策略配置派生，不硬编码个人目录）
     if tn in _BASH_TOOLS:
+        prefixes = _extract_privacy_prefixes(privacy_dirs, privacy_prefixes)
         for p in paths:
             # 归一化反斜杠以支持 Windows 路径
             p_norm = p.replace("\\", "/")
-            if "000【备忘录" in p_norm:
+            if any(prefix in p_norm for prefix in prefixes):
                 return make_deny_output(
                     "Bash 命令包含隐私目录前缀",
                     ".meta/rules/category-privacy.md",
@@ -468,6 +508,7 @@ def run_pre_tool(args: argparse.Namespace) -> int:
     primary_host = load_primary_host(root)
     is_primary = is_primary_host(hostname, primary_host)
     privacy_dirs = policy.get("privacy_dirs", [])
+    privacy_prefixes = policy.get("privacy_prefixes", [])
     deny_rules = policy.get("deny_rules", [])
 
     # simulate-host 覆盖
@@ -480,7 +521,9 @@ def run_pre_tool(args: argparse.Namespace) -> int:
 
     # 判定顺序
     # P0 隐私
-    result = _check_privacy(paths, privacy_dirs, tool_name)
+    result = _check_privacy(
+        paths, privacy_dirs, tool_name, privacy_prefixes=privacy_prefixes
+    )
     if result:
         if hasattr(args, "simulate_host") and args.simulate_host:
             result["simulated"] = True

@@ -457,7 +457,10 @@ def _section_script_collection():
     默认空（不扫）；目标仓库在 .env 设 SCRIPT_COLLECTION_DIR 启用脚本收集扫描。
     空值或文件夹不存在则静默跳过。"""
     # 默认空；目标仓库在 .env 设 SCRIPT_COLLECTION_DIR 启用脚本收集扫描
-    scripts_dir_rel = _os.environ.get('SCRIPT_COLLECTION_DIR', '')
+    scripts_dir_rel = (
+        ENV.get('SCRIPT_COLLECTION_DIR')
+        or _os.environ.get('SCRIPT_COLLECTION_DIR', '')
+    ).strip()
     lines = [
         "## 脚本收集",
         "",
@@ -507,14 +510,37 @@ def append_trend(total, orphans):
     row = [now, str(total), str(orphans)]
     header = ["date", "total_notes", "orphans"]
 
-    if not TREND_PATH.exists():
-        with open(TREND_PATH, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
+    rows = []
+    if TREND_PATH.exists():
+        with open(TREND_PATH, 'r', newline='', encoding='utf-8') as f:
+            rows = [r for r in csv.reader(f) if r]
 
-    with open(TREND_PATH, 'a', newline='', encoding='utf-8') as f:
+    if rows and rows[0] == header:
+        data_rows = rows[1:]
+    elif rows and rows[0][0] == "date":
+        header = rows[0]
+        data_rows = rows[1:]
+    else:
+        data_rows = rows
+
+    # 同日去重：若已有今日记录则替换为最新值（并折叠历史同日重复行），否则追加
+    updated = []
+    replaced = False
+    for r in data_rows:
+        if r[0] == now:
+            if not replaced:
+                updated.append(row)
+                replaced = True
+        else:
+            updated.append(r)
+    if not replaced:
+        updated.append(row)
+
+    TREND_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(TREND_PATH, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(row)
+        writer.writerow(header)
+        writer.writerows(updated)
 
 
 def main():
