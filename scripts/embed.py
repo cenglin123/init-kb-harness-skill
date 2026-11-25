@@ -49,7 +49,7 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
-        print(f"  ⚠️  {name}='{raw}' 不是整数，回落 {default}")
+        print(f"  ⚠️  {name}='{raw}' 不是整数，回落 {default}", file=sys.stderr)
         return default
 
 
@@ -59,7 +59,7 @@ def _chunk_params() -> tuple:
     overlap = _env_int('EMBED_CHUNK_OVERLAP', d_overlap)
     if chars <= 0 or overlap < 0 or overlap >= chars:
         print(f"  ⚠️  分块参数非法（chars={chars}, overlap={overlap}），"
-              f"回落 {d_chars}/{d_overlap}")
+              f"回落 {d_chars}/{d_overlap}", file=sys.stderr)
         chars, overlap = d_chars, d_overlap
     return chars, overlap
 

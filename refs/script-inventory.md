@@ -9,7 +9,7 @@ Phase 1 将 `scripts/` 下全部 25 个 KB 脚本一次拷入目标仓库 `.meta
 | 脚本 | 功能 | 依赖 | CLI |
 |------|------|------|-----|
 | `maintain.py` | 维护主入口（全管线编排，见文件头）；语义层默认启用（内置模型），LLM 层看 `HARNESS_MODE=full` + key；语义层缺失/失败时退出码 3 | 编排下方各脚本 | `--full`（重建本地派生件，不强制重嵌入）/ `--no-git` / `--semantic-lint` / `--skip-changelog` |
-| `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**语义层运行时不可用（库空/维度不符/端点断/索引损坏）时自动降级**：默认查询与 `--check` 走 BM25（含 `--scope` 过滤），两者都不可用时退出码 2；`--deep`/`--rerank` 需 LLM 层；有嵌入库时**低置信自动升级**（top-1 < 阈值自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`，阈值 `.env:ESCALATION_THRESHOLD` 可调） | `embeddings.sqlite` + `graph.json` + bm25 索引；embeddings 端点（查询）、DeepSeek（`--rerank`/`--deep`） | `"query"` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
+| `ask.py` | 语义检索 / 查重 / 孤儿 / 反链 / 图遍历；**语义层运行时不可用（库空/维度不符/端点断/索引损坏）时自动降级**：默认查询与 `--check` 走 BM25（含 `--scope` 过滤），两者都不可用时退出码 2；`--deep`/`--rerank` 需 LLM 层；有嵌入库时**低置信自动升级**（top-1 < 阈值自动 hybrid/deep/rerank 合并，统计写 `.meta/escalation-stats.jsonl`，阈值 `.env:ESCALATION_THRESHOLD` 可调） | `embeddings.sqlite` + `graph.json` + bm25 索引；embeddings 端点（查询）、DeepSeek（`--rerank`/`--deep`） | `"query"` / `--json` / `--no-log` / `--top-k` / `--check` / `--orphans` / `--backlinks` / `--neighbors` / `--path` / `--deep` / `--bm25` / `--hybrid` / `--rerank` / `--scope` / `--decay` / `--save` |
 | `whoami.py` | 模型/provider 自检（两层识别：harness 路由 codex/claude-code/opencode → 内部 provider）；`--frontmatter` 输出溯源 YAML（`agent`/`model`/`generated_at`，`WHOAMI_AGENT` env 可显式指定宿主） | 本地只读，零 API | 无参 / `--frontmatter` |
 
 ---

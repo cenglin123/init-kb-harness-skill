@@ -175,11 +175,11 @@ def summarize_command_output(output: str) -> list:
             bullets.append(f"重建索引：manifest / topics，覆盖 {categories} 个分类")
             continue
 
-        m = re.search(r'✓ health-report\.md \((\d+) 篇,\s*(\d+) 孤儿,\s*(\d+) 收件箱\)', stripped)
+        m = re.search(r'✓ health-report\.md \((\d+) 篇,\s*(?:(\d+) 孤儿|孤儿 (\d+)=[^,]+),\s*(\d+) 收件箱\)', stripped)
         if m:
             total = int(m.group(1))
-            orphans = int(m.group(2))
-            inbox = int(m.group(3))
+            orphans = int(m.group(2) or m.group(3))
+            inbox = int(m.group(4))
             bullets.append(f"刷新健康报告：{total} 篇笔记、{orphans} 篇孤儿、{inbox} 项收件箱")
             continue
 

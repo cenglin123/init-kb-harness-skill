@@ -1437,6 +1437,14 @@ def resolve_mdlink(target: str, source_path: str,
 # Session-level rerank cache
 _rerank_cache = {}
 
+_LAST_RERANK_STATUS: dict = {'degraded': False, 'reason': None}
+
+
+def get_last_rerank_status() -> dict:
+    """返回最近一次 rerank_with_llm 调用的降级状态快照。"""
+    return dict(_LAST_RERANK_STATUS)
+
+
 def rerank_with_llm(query, candidates, top_m=5):
     """LLM-as-Judge 精排：对候选 chunk 做相关性打分（1-10）
 
@@ -1449,6 +1457,9 @@ def rerank_with_llm(query, candidates, top_m=5):
         [(path, chunk_index, score), ...] 精排后的结果，score 为归一化后的 LLM 打分（0-1）
     """
     import hashlib, json
+
+    _LAST_RERANK_STATUS['degraded'] = False
+    _LAST_RERANK_STATUS['reason'] = None
 
     if not candidates:
         return []
@@ -1510,6 +1521,9 @@ def rerank_with_llm(query, candidates, top_m=5):
                     _rerank_cache[cache_key] = score
                     cache_hits.append((path, chunk_idx, text, score))
         except Exception as e:
+            is_timeout = isinstance(e, (TimeoutError, requests.exceptions.Timeout)) or 'timeout' in str(e).lower() or 'timed out' in str(e).lower()
+            _LAST_RERANK_STATUS['degraded'] = True
+            _LAST_RERANK_STATUS['reason'] = 'timeout' if is_timeout else 'error'
             print(f"⚠️  Re-rank API 不可用，跳过精排: {e}", file=sys.stderr)
             print("rerank_degraded", file=sys.stderr)
             # Fallback: return original order with dummy scores

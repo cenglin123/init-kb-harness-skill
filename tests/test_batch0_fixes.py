@@ -346,6 +346,70 @@ class HostGuardPrivacyConfigTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(data.get('decision'), 'allow')
 
+    def test_append_trend_handles_utf8_bom_and_invalid_encoding(self):
+        """P2-3: health-trend.csv 带 UTF-8 BOM 或坏编码时能正确剥 BOM / 降级重建并原子写回。"""
+        (self.vault / 'AGENTS.md').write_text('# Vault\n', encoding='utf-8')
+        scripts_dir = self.vault / '.meta' / 'scripts'
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        for src in (Path(__file__).resolve().parent.parent / 'scripts').glob('*.py'):
+            shutil.copyfile(src, scripts_dir / src.name)
+        trend = self.vault / '.meta' / 'health-trend.csv'
+        trend.parent.mkdir(parents=True, exist_ok=True)
+        trend.write_bytes(b'\xef\xbb\xbfdate,total_notes,orphans\r\n2026-01-01,10,1\r\n')
+        code = f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, r'{scripts_dir}')
+import health_report as hr
+hr.TREND_PATH = Path(r'{trend}')
+hr.append_trend(12, 2)
+"""
+        proc = subprocess.run(
+            [sys.executable, '-X', 'utf8', '-c', code],
+            cwd=self.vault, capture_output=True, text=True, encoding='utf-8',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = trend.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(lines[0], 'date,total_notes,orphans')
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[1], '2026-01-01,10,1')
+
+        # 非法 UTF-8 字节应优雅重建而非崩溃
+        trend.write_bytes(b'\xff\xfe\x80\x81')
+        proc2 = subprocess.run(
+            [sys.executable, '-X', 'utf8', '-c', code],
+            cwd=self.vault, capture_output=True, text=True, encoding='utf-8',
+        )
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        lines2 = trend.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(lines2[0], 'date,total_notes,orphans')
+        self.assertEqual(len(lines2), 2)
+
+    def test_maintain_parses_current_health_report_summary(self):
+        """P2-2: maintain.py 正则必须匹配 health_report.py 现行 '孤儿 X=Y活+Z档' 输出。"""
+        (self.vault / 'AGENTS.md').write_text('# Vault\n', encoding='utf-8')
+        scripts_dir = self.vault / '.meta' / 'scripts'
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        for src in (Path(__file__).resolve().parent.parent / 'scripts').glob('*.py'):
+            shutil.copyfile(src, scripts_dir / src.name)
+        code = f"""
+import json, sys
+sys.path.insert(0, r'{scripts_dir}')
+import maintain
+sample = '✓ health-report.md (42 篇, 孤儿 5=3活+2档, 7 收件箱)'
+print(json.dumps(maintain.summarize_command_output(sample), ensure_ascii=False))
+"""
+        proc = subprocess.run(
+            [sys.executable, '-X', 'utf8', '-c', code],
+            cwd=self.vault, capture_output=True, text=True, encoding='utf-8',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        bullets = json.loads(proc.stdout.strip())
+        self.assertTrue(
+            any('42 篇笔记' in b and '5 篇孤儿' in b and '7 项收件箱' in b for b in bullets),
+            bullets,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

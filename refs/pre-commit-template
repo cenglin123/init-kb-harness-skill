@@ -44,7 +44,7 @@ while IFS= read -r path; do
     case "$path" in
         docs/plans/*.md)
             [ ! -f "$path" ] && continue
-            if head -20 "$path" | grep -q 'status:\s*done'; then
+            if head -20 "$path" | grep -qE 'status:\s*(done|completed)'; then
                 if grep -qE '^\s*- \[ \]' "$path"; then
                     PLAN_FAKE_DONE_HITS="$PLAN_FAKE_DONE_HITS\n  - $path"
                 fi
@@ -56,7 +56,7 @@ done <<< "$STAGED_FILES"
 if [ -n "$PLAN_FAKE_DONE_HITS" ]; then
     echo "⚠️  Git commit 被拒绝：plan 假完成"
     echo ""
-    echo "以下 plan 文件 frontmatter 声明 status: done，但完工检查清单仍有未勾选项 (- [ ])："
+    echo "以下 plan 文件 frontmatter 声明 status: done/completed，但完工检查清单仍有未勾选项 (- [ ])："
     echo -e "$PLAN_FAKE_DONE_HITS"
     echo ""
     echo "请将所有完工检查清单项勾选为 - [x] 后再提交。"

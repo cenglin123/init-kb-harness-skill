@@ -564,6 +564,103 @@ print(json.dumps({{'len': len(vec), 'fallback': len(fallback_calls), 'first': ve
         finally:
             sidecar.close()
 
+    def test_json_rerank_timeout_and_error_emit_degraded_envelope(self):
+        """P1-1: rerank 超时/异常时信封必须如实声明 degraded=True 与 detail.rerank.skipped，不谎报 mode='rerank'。"""
+        self.write_env(enabled=True, extra='HARNESS_MODE=full\nDEEPSEEK_API_KEY=sk-test-dummy')
+        emb = self.run_script('embed.py', '--full')
+        self.assertEqual(emb.returncode, 0, emb.stderr)
+
+        for err_expr, expected_reason in [
+            ("TimeoutError('read timed out')", 'timeout'),
+            ("RuntimeError('upstream 502')", 'error'),
+        ]:
+            code = f"""
+import sys
+sys.path.insert(0, r'{self.scripts}')
+import common, ask
+
+class FailingDeepSeek:
+    def chat(self, *a, **kw):
+        raise {err_expr}
+
+common.DeepSeekClient = FailingDeepSeek
+try:
+    ask.main(['--json', '--no-log', '--rerank', '--', '设备维保'])
+except SystemExit as e:
+    sys.exit(e.code)
+"""
+            env = os.environ.copy()
+            env['KB_QUERY_SIDECAR_URL'] = 'off'
+            proc = subprocess.run(
+                [sys.executable, '-X', 'utf8', '-c', code],
+                cwd=self.vault,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = self.parse_single_envelope(proc.stdout)
+            self.assertTrue(payload['ok'])
+            self.assertTrue(payload['degraded'])
+            self.assertIn(payload['detail'].get('mode'), ('dense', 'hybrid'))
+            self.assertNotEqual(payload['detail'].get('mode'), 'rerank')
+            self.assertEqual(
+                payload['detail'].get('rerank'),
+                {'skipped': expected_reason},
+            )
+            self.assertGreaterEqual(len(payload['results']), 1)
+
+    def test_embed_bad_env_warns_to_stderr_not_stdout(self):
+        """P2-1: .env 中 EMBED_CHUNK_CHARS 非法值告警必须打到 stderr，不得污染 --json 的 stdout 单文档信封。"""
+        self.write_env(enabled=False)
+        bm = self.run_script('bm25_index.py', '--build')
+        self.assertEqual(bm.returncode, 0, bm.stderr)
+        (self.vault / '.env').write_text(
+            'HARNESS_MODE=lite\nEMBED_PROVIDER=off\nEMBED_CHUNK_CHARS=not_an_int\n',
+            encoding='utf-8',
+        )
+        proc = self.run_script('ask.py', '--json', '--no-log', '--bm25', '--', '设备维保')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('EMBED_CHUNK_CHARS', proc.stderr)
+        payload = self.parse_single_envelope(proc.stdout)
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['detail']['mode'], 'bm25')
+
+    def test_preload_file_dates_scans_new_paths_incrementally(self):
+        """P2-5: 同进程后续新增候选路径也能触发增量批量 git_last_dates，不静默退化为 mtime。"""
+        code = f"""
+import json, sys
+sys.path.insert(0, r'{self.scripts}')
+import ask
+
+calls = []
+def fake_git_last_dates(paths):
+    calls.append(list(paths))
+    return {{p: 1700000000.0 for p in paths}}
+
+ask._file_dates = {{}}
+ask._git_dates_cache.clear()
+ask._git_dates_checked.clear()
+ask.git_last_dates = fake_git_last_dates
+
+ask._preload_file_dates(['notes/a.md'])
+ask._preload_file_dates(['notes/a.md'])
+ask._preload_file_dates(['notes/a.md', 'notes/b.md'])
+print(json.dumps({{'calls': calls, 'keys': sorted(ask._git_dates_cache.keys())}}))
+"""
+        proc = subprocess.run(
+            [sys.executable, '-X', 'utf8', '-c', code],
+            cwd=self.vault,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = json.loads(proc.stdout.strip())
+        self.assertEqual(out['calls'], [['notes/a.md'], ['notes/b.md']])
+        self.assertEqual(out['keys'], ['notes/a.md', 'notes/b.md'])
+
 
 if __name__ == '__main__':
     unittest.main()

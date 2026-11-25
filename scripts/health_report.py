@@ -512,8 +512,12 @@ def append_trend(total, orphans):
 
     rows = []
     if TREND_PATH.exists():
-        with open(TREND_PATH, 'r', newline='', encoding='utf-8') as f:
-            rows = [r for r in csv.reader(f) if r]
+        try:
+            with open(TREND_PATH, 'r', newline='', encoding='utf-8-sig') as f:
+                rows = [r for r in csv.reader(f) if r]
+        except UnicodeDecodeError as e:
+            print(f"  ⚠️  health-trend.csv 解码失败，重建趋势文件: {e}", file=sys.stderr)
+            rows = []
 
     if rows and rows[0] == header:
         data_rows = rows[1:]
@@ -537,10 +541,20 @@ def append_trend(total, orphans):
         updated.append(row)
 
     TREND_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(TREND_PATH, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(updated)
+    tmp_path = TREND_PATH.with_name(f".{TREND_PATH.name}.{_os.getpid()}.tmp")
+    try:
+        with open(tmp_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(updated)
+        _os.replace(tmp_path, TREND_PATH)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def main():

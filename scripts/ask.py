@@ -38,7 +38,7 @@ from common import (
     llm_enabled, threshold_defaults, ENV, BUILTIN_EMBED_DEFAULT_MODEL,
     find_all_wikilinks, find_all_mdlinks, iter_markdown_content_lines,
     WIKILINK_RE, resolve_wikilink, resolve_mdlink, parse_aliases, log_script_run,
-    rerank_with_llm, office_extract_source, git_last_dates,
+    rerank_with_llm, get_last_rerank_status, office_extract_source, git_last_dates,
 )
 from embed import (
     read_meta,
@@ -105,6 +105,7 @@ _JSON_STATE = {
     'mode': 'dense',
     'graph_fallback': False,
     'degraded': False,
+    'rerank': None,
 }
 # B 级遥测门控（--no-log 与 --json 下关闭，禁止写入 usage-log / escalation-stats）
 _TELEMETRY = {'enabled': True}
@@ -136,6 +137,7 @@ def _reset_json_state() -> None:
         'mode': 'dense',
         'graph_fallback': False,
         'degraded': False,
+        'rerank': None,
     })
 
 
@@ -305,7 +307,7 @@ def path_matches_scope(path: str, scope: str) -> bool:
 # 文件日期清单缓存（惰性加载）
 _file_dates: dict | None = None
 _git_dates_cache: dict = {}
-_git_dates_loaded: bool = False
+_git_dates_checked: set = set()
 
 
 def _load_file_dates() -> dict:
@@ -327,13 +329,12 @@ def _load_file_dates() -> dict:
 
 
 def _preload_file_dates(paths) -> None:
-    """批量预填充缺失的 git 文件日期（每次查询至多一次 git_last_dates 全库扫描，消除 N+1 子进程）。"""
-    global _git_dates_loaded
+    """批量预填充缺失的 git 文件日期（按未查询路径集合增量批量扫描，消除 N+1 子进程）。"""
     dates = _load_file_dates()
-    missing = [p for p in paths if p not in dates and p not in _git_dates_cache]
-    if not missing or _git_dates_loaded:
+    missing = [p for p in paths if p not in dates and p not in _git_dates_checked]
+    if not missing:
         return
-    _git_dates_loaded = True
+    _git_dates_checked.update(missing)
     try:
         scanned = git_last_dates(missing)
         if scanned:
@@ -345,15 +346,15 @@ def _preload_file_dates(paths) -> None:
 def get_file_age_years(path: str) -> float | None:
     """返回文件最后有意义修改距今的年数。三级回退（零逐文件 git 子进程）：
     ① .meta/file-dates.json（主机维护生成，从机可用）
-    ② 批量 git_last_dates 缓存（每次查询至多触发一次单趟 git log）
+    ② 批量 git_last_dates 缓存（按批次增量单趟 git log）
     ③ 文件系统 mtime（最后兜底）"""
     # ① 文件日期清单（主机/从机通用）
     dates = _load_file_dates()
     if path in dates:
         return (datetime.now().timestamp() - dates[path]) / SECONDS_PER_YEAR
 
-    # ② 单趟批量 git 日期缓存
-    if not _git_dates_loaded:
+    # ② 批量 git 日期缓存
+    if path not in _git_dates_checked:
         _preload_file_dates([path])
     if path in _git_dates_cache:
         return (datetime.now().timestamp() - _git_dates_cache[path]) / SECONDS_PER_YEAR
@@ -1006,6 +1007,9 @@ def _hybrid_search_core(query, top_k=5, scope='notes', decay_params=None,
             bm25_raw = bm25_search(query, top_k=top_k * 4)
         except Exception as e:
             print(f"⚠️  BM25 检索失败，退化为纯 Dense: {e}", file=sys.stderr)
+            if _json_mode():
+                _JSON_STATE['degraded'] = True
+                _JSON_STATE['mode'] = 'dense'
             return (dense_results[:top_k] if dense_results is not None else None), dense_meta
     if bm25_raw is None:
         if dense_results is None:
@@ -1014,10 +1018,16 @@ def _hybrid_search_core(query, top_k=5, scope='notes', decay_params=None,
             print("⚠️  语义层与 BM25 均不可用", file=sys.stderr)
             return None, {}
         print("⚠️  BM25 索引不可用，hybrid 退化为纯 Dense", file=sys.stderr)
+        if _json_mode():
+            _JSON_STATE['degraded'] = True
+            _JSON_STATE['mode'] = 'dense'
         return dense_results[:top_k], dense_meta
     if dense_results is None:
         # 语义层运行时不可用：退回纯 BM25（调用方会标注降级）
         print("⚠️  语义层不可用，hybrid 退化为纯 BM25", file=sys.stderr)
+        if _json_mode():
+            _JSON_STATE['degraded'] = True
+            _JSON_STATE['mode'] = 'bm25'
         best = {}
         for path, chunk_idx, score in bm25_raw:
             if not path_matches_scope(path, scope):
@@ -1099,6 +1109,12 @@ def rerank_results(query, results, top_m=5):
         return results[:top_m]
 
     reranked = rerank_with_llm(query, candidates, top_m=top_m)
+    rr_status = get_last_rerank_status()
+    if rr_status.get('degraded'):
+        if _json_mode():
+            _JSON_STATE['degraded'] = True
+            _JSON_STATE['rerank'] = {'skipped': rr_status.get('reason') or 'error'}
+        return results[:top_m]
 
     # Map back to (path, score) format
     path_scores = {}
@@ -1423,7 +1439,8 @@ def _run_json_query(args, *, query: str, top_k: int, decay_params, use_hybrid: b
             if args.rerank:
                 rerank_m = args.rerank_top_m if args.rerank_top_m is not None else min(top_k, 5)
                 results = rerank_results(query, results, top_m=rerank_m)
-                _JSON_STATE['mode'] = 'rerank'
+                if not _JSON_STATE['rerank']:
+                    _JSON_STATE['mode'] = 'rerank'
 
             rows = _json_result_rows(results, chunk_meta)
     except _AskFailure as exc:
@@ -1433,6 +1450,8 @@ def _run_json_query(args, *, query: str, top_k: int, decay_params, use_hybrid: b
         'mode': _JSON_STATE['mode'],
         'escalated': list(_JSON_STATE['escalated']),
     }
+    if _JSON_STATE['rerank']:
+        detail['rerank'] = dict(_JSON_STATE['rerank'])
     if _JSON_STATE['graph_fallback']:
         detail['graph_fallback'] = True
     _emit_json(
