@@ -16,28 +16,36 @@ ask.py — 语义查询 / 查重 / 孤儿检测
 """
 
 import sys
+import os
 import re
+import math
 import sqlite3
 import argparse
+import contextlib
 import json
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
 import numpy as np
+import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     VAULT_ROOT, scan_notes, rel_path, meta_mirror, ensure_parent,
     get_embeddings_client, embed_settings, embed_unavailable_hint,
-    llm_enabled, threshold_defaults, ENV,
+    llm_enabled, threshold_defaults, ENV, BUILTIN_EMBED_DEFAULT_MODEL,
     find_all_wikilinks, find_all_mdlinks, iter_markdown_content_lines,
     WIKILINK_RE, resolve_wikilink, resolve_mdlink, parse_aliases, log_script_run,
-    rerank_with_llm, office_extract_source,
+    rerank_with_llm, office_extract_source, git_last_dates,
 )
-from embed import read_meta
+from embed import (
+    read_meta,
+    chunk_text as embed_chunk_text,
+    CHUNK_CHARS as EMBED_CHUNK_CHARS,
+    CHUNK_OVERLAP as EMBED_CHUNK_OVERLAP,
+)
 try:
     from build_graph import get_neighbors, find_shortest_path
 except ImportError:
@@ -45,10 +53,16 @@ except ImportError:
     get_neighbors = None
     find_shortest_path = None
 try:
-    from bm25_index import search as bm25_search
+    from bm25_index import (
+        search as bm25_search,
+        BM25_CHUNK_CHARS,
+        BM25_CHUNK_OVERLAP,
+    )
 except ImportError:
     # bm25_index.py 缺失时 --bm25/--hybrid 不可用
     bm25_search = None
+    BM25_CHUNK_CHARS = 3000
+    BM25_CHUNK_OVERLAP = 300
 
 DB_PATH = VAULT_ROOT / '.meta' / 'embeddings.sqlite'
 GRAPH_PATH = VAULT_ROOT / '.meta' / 'graph.json'
@@ -64,6 +78,122 @@ GRAY_ZONE_LO, GRAY_ZONE_HI = 0.5, 0.7  # 衰减感知灰区 final score 区间
 GRAY_ZONE_AGE_YEARS = 1.0              # 灰区要求 top-1 结果 age > 此年数
 ESCALATION_RECALL_TOP_K = 15           # low_conf 时 hybrid 扩召回 top-k
 ESCALATION_STATS_LOG = VAULT_ROOT / '.meta' / 'escalation-stats.jsonl'
+
+# === `--json` 输出契约常量（与 agent-memory `kb.rs` 对齐）===
+JSON_CONTRACT_VERSION = 1
+EXIT_CODE_OK = 0
+EXIT_CODE_INVALID_REQUEST = 2
+EXIT_CODE_LOCAL_UNAVAILABLE = 12
+EXIT_CODE_PROFILE_MISMATCH = 13
+EXIT_CODE_REMOTE_AUTH_REQUIRED = 16
+
+ASK_EXIT_CODES = {
+    'OK': EXIT_CODE_OK,
+    'INVALID_REQUEST': EXIT_CODE_INVALID_REQUEST,
+    'LOCAL_UNAVAILABLE': EXIT_CODE_LOCAL_UNAVAILABLE,
+    'PROFILE_MISMATCH': EXIT_CODE_PROFILE_MISMATCH,
+    'REMOTE_AUTH_REQUIRED': EXIT_CODE_REMOTE_AUTH_REQUIRED,
+}
+
+DEFAULT_QUERY_SIDECAR_URL = 'http://127.0.0.1:11435/api/embed'
+DEFAULT_QUERY_SIDECAR_TIMEOUT = 1.5
+_SIDECAR_OFF_VALUES = {'', 'off', '0', 'false', 'none', 'disabled'}
+
+_JSON_STATE = {
+    'enabled': False,
+    'escalated': [],
+    'mode': 'dense',
+    'graph_fallback': False,
+    'degraded': False,
+}
+# B 级遥测门控（--no-log 与 --json 下关闭，禁止写入 usage-log / escalation-stats）
+_TELEMETRY = {'enabled': True}
+
+
+class _AskFailure(Exception):
+    """查询链的类型化失败，携带 ask 契约错误码与退出码。"""
+
+    def __init__(self, code: str, message: str, detail: dict | None = None):
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
+        self.detail = detail
+        self.exit_code = int(ASK_EXIT_CODES.get(code, EXIT_CODE_INVALID_REQUEST))
+
+
+def _json_mode() -> bool:
+    return bool(_JSON_STATE['enabled'])
+
+
+def _telemetry_enabled() -> bool:
+    return bool(_TELEMETRY['enabled'])
+
+
+def _reset_json_state() -> None:
+    _JSON_STATE.update({
+        'enabled': False,
+        'escalated': [],
+        'mode': 'dense',
+        'graph_fallback': False,
+        'degraded': False,
+    })
+
+
+def _json_envelope(ok: bool, *, results=None, detail=None, error=None,
+                   degraded: bool = False) -> dict:
+    payload = {
+        'contract_version': JSON_CONTRACT_VERSION,
+        'ok': bool(ok),
+        'vault_root': str(VAULT_ROOT).replace('\\\\?\\', ''),
+        'degraded': bool(degraded),
+        'detail': detail if detail is not None else {'mode': 'dense', 'escalated': []},
+        'results': results if results is not None else [],
+    }
+    if error is not None:
+        payload['error'] = error
+    return payload
+
+
+def _emit_json(payload: dict, exit_code: int = 0):
+    """stdout 唯一出口：单行 JSON 信封，随后以契约退出码退出。"""
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+    raise SystemExit(exit_code)
+
+
+def _json_error(code: str, message: str, exit_code: int, detail: dict | None = None):
+    error = {
+        'code': code,
+        'message': message,
+        'detail': {'ask_code': code, 'exit_code': exit_code},
+    }
+    if detail:
+        error['detail'].update(detail)
+    _emit_json(
+        _json_envelope(
+            False,
+            results=[],
+            detail={'mode': _JSON_STATE['mode'], 'escalated': []},
+            error=error,
+        ),
+        exit_code,
+    )
+
+
+def _open_db_ro(path: Path | None = None) -> sqlite3.Connection:
+    """只读打开 embeddings.sqlite（缺失不新建 0 字节文件，不触碰 WAL/SHM）。"""
+    db_path = Path(path) if path is not None else DB_PATH
+    if not db_path.exists():
+        raise _AskFailure(
+            'LOCAL_UNAVAILABLE',
+            '语义层尚未建立（.meta/embeddings.sqlite 不存在）',
+        )
+    try:
+        uri = f'{db_path.resolve().as_uri()}?mode=ro'
+        return sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        raise _AskFailure('LOCAL_UNAVAILABLE', f'嵌入库不可读（{exc}）') from exc
 
 
 @dataclass(frozen=True)
@@ -174,6 +304,8 @@ def path_matches_scope(path: str, scope: str) -> bool:
 
 # 文件日期清单缓存（惰性加载）
 _file_dates: dict | None = None
+_git_dates_cache: dict = {}
+_git_dates_loaded: bool = False
 
 
 def _load_file_dates() -> dict:
@@ -184,36 +316,47 @@ def _load_file_dates() -> dict:
     dates_path = VAULT_ROOT / '.meta' / 'file-dates.json'
     if dates_path.exists():
         try:
-            _file_dates = json.loads(dates_path.read_text(encoding='utf-8'))
-            return _file_dates
+            loaded = json.loads(dates_path.read_text(encoding='utf-8'))
+            if isinstance(loaded, dict):
+                _file_dates = loaded
+                return _file_dates
         except Exception:
             pass
     _file_dates = {}
     return _file_dates
 
 
+def _preload_file_dates(paths) -> None:
+    """批量预填充缺失的 git 文件日期（每次查询至多一次 git_last_dates 全库扫描，消除 N+1 子进程）。"""
+    global _git_dates_loaded
+    dates = _load_file_dates()
+    missing = [p for p in paths if p not in dates and p not in _git_dates_cache]
+    if not missing or _git_dates_loaded:
+        return
+    _git_dates_loaded = True
+    try:
+        scanned = git_last_dates(missing)
+        if scanned:
+            _git_dates_cache.update(scanned)
+    except Exception:
+        pass
+
+
 def get_file_age_years(path: str) -> float | None:
-    """返回文件最后有意义修改距今的年数。三级回退：
+    """返回文件最后有意义修改距今的年数。三级回退（零逐文件 git 子进程）：
     ① .meta/file-dates.json（主机维护生成，从机可用）
-    ② git log（主机上直接可用）
+    ② 批量 git_last_dates 缓存（每次查询至多触发一次单趟 git log）
     ③ 文件系统 mtime（最后兜底）"""
     # ① 文件日期清单（主机/从机通用）
     dates = _load_file_dates()
     if path in dates:
         return (datetime.now().timestamp() - dates[path]) / SECONDS_PER_YEAR
 
-    # ② git log
-    try:
-        result = subprocess.run(
-            ['git', 'log', '-1', '--format=%at', '--', path],
-            capture_output=True, text=True, cwd=str(VAULT_ROOT),
-            timeout=5, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            last_ts = float(result.stdout.strip())
-            return (datetime.now().timestamp() - last_ts) / SECONDS_PER_YEAR
-    except Exception:
-        pass
+    # ② 单趟批量 git 日期缓存
+    if not _git_dates_loaded:
+        _preload_file_dates([path])
+    if path in _git_dates_cache:
+        return (datetime.now().timestamp() - _git_dates_cache[path]) / SECONDS_PER_YEAR
 
     # ③ 文件系统 mtime
     full_path = VAULT_ROOT / path
@@ -226,6 +369,8 @@ def apply_time_decay(path: str, sim: float, decay_params: tuple | None = None) -
     """基于内容年龄的分档时间衰减。decay_params=(<1年乘数, 1-2年乘数, ≥2年乘数)，默认 (1.0, 0.8, 0.5)。"""
     if decay_params is None:
         decay_params = (1.0, 0.8, 0.5)
+    if all(v == 1.0 for v in decay_params):
+        return sim
     age_years = get_file_age_years(path)
     if age_years is None:
         return sim
@@ -237,119 +382,263 @@ def apply_time_decay(path: str, sim: float, decay_params: tuple | None = None) -
         return sim * decay_params[2]
 
 
-def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
-    if not DB_PATH.exists():
-        print("⚠️  语义层尚未建立（.meta/embeddings.sqlite 不存在）。请用 --bm25，"
-              "或配置嵌入来源后跑维护生成向量。")
+def _query_sidecar_url() -> str | None:
+    """单条查询专用 sidecar URL；支持环境变量 KB_QUERY_SIDECAR_URL 覆盖或设为 off 关闭。"""
+    raw = os.environ.get('KB_QUERY_SIDECAR_URL')
+    if raw is None:
+        raw = ENV.get('KB_QUERY_SIDECAR_URL')
+    if raw is None:
+        raw = DEFAULT_QUERY_SIDECAR_URL
+    cleaned = raw.strip()
+    if cleaned.lower() in _SIDECAR_OFF_VALUES:
         return None
+    return cleaned
+
+
+def _query_sidecar_timeout() -> float:
+    raw = os.environ.get('KB_QUERY_SIDECAR_TIMEOUT')
+    if raw is None:
+        raw = ENV.get('KB_QUERY_SIDECAR_TIMEOUT')
+    if raw is not None:
+        try:
+            val = float(raw.strip())
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return DEFAULT_QUERY_SIDECAR_TIMEOUT
+
+
+def _embed_query_via_sidecar(query: str, cfg: dict, expected_dim: int = 512) -> list | None:
+    """仅限 ask.py 单条查询热路径：探测本机 Ollama 兼容 embedding sidecar。
+
+    仅在 builtin + bge-small-zh-v1.5 下生效，带短超时与维度/有限值校验；
+    任何异常或不匹配均静默返回 None，回退进程内 fastembed。
+    绝不用于批量 embed.py，避免与 sidecar 全局锁争用。
+    """
+    if cfg.get('provider') != 'builtin':
+        return None
+    if cfg.get('model') != BUILTIN_EMBED_DEFAULT_MODEL:
+        return None
+    url = _query_sidecar_url()
+    if not url:
+        return None
+    timeout = _query_sidecar_timeout()
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        resp = session.post(
+            url,
+            json={'model': cfg['model'], 'input': [query]},
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        resp_model = data.get('model')
+        if resp_model and resp_model != cfg['model']:
+            return None
+        embeddings = data.get('embeddings')
+        if (not isinstance(embeddings, list) or len(embeddings) != 1
+                or not isinstance(embeddings[0], list)):
+            return None
+        vec = embeddings[0]
+        if len(vec) != expected_dim:
+            return None
+        norm_sq = 0.0
+        out = []
+        for x in vec:
+            fx = float(x)
+            if not math.isfinite(fx):
+                return None
+            norm_sq += fx * fx
+            out.append(fx)
+        if not math.isfinite(norm_sq) or norm_sq <= 0.0:
+            return None
+        return out
+    except Exception:
+        return None
+    finally:
+        session.close()
+
+
+def _embed_single_query(query: str, cfg: dict, meta: dict | None = None) -> list | None:
+    """单条查询向量化：builtin 默认模型先走本机 sidecar 快路径，失败静默回退客户端。"""
+    expected_dim = int(meta['dim']) if (meta and meta.get('dim')) else 512
+    sidecar_vec = _embed_query_via_sidecar(query, cfg, expected_dim=expected_dim)
+    if sidecar_vec is not None:
+        return sidecar_vec
+    client = get_embeddings_client(
+        cfg, timeout=float(ENV.get('EMBED_QUERY_TIMEOUT') or 20))
+    if type(client).__name__ == 'HttpEmbeddingsClient' and hasattr(client, '_post'):
+        q_vecs = client._post([query])
+    else:
+        q_vecs = client.embed_batch([query])
+    if not q_vecs or q_vecs[0] is None:
+        return None
+    return q_vecs[0]
+
+
+def _semantic_search_core(query: str, top_k=5, scope='notes', decay_params=None,
+                          *, raise_on_error: bool = False):
+    """语义检索核心：返回 `(results, chunk_meta)`，chunk_meta 为 `{path: (chunk_index, 'dense')}`。"""
+    def _fail(code: str, msg: str):
+        if raise_on_error:
+            raise _AskFailure(code, msg)
+        print(f"⚠️  {msg}", file=sys.stderr)
+        return None, {}
+
+    if not DB_PATH.exists():
+        return _fail(
+            'LOCAL_UNAVAILABLE',
+            '语义层尚未建立（.meta/embeddings.sqlite 不存在）。请用 --bm25，'
+            '或配置嵌入来源后跑维护生成向量。',
+        )
     cfg = embed_settings()
     if not cfg['enabled']:
-        print(f"⚠️  语义层不可用：{embed_unavailable_hint(cfg)}")
-        return None
-
-    db = sqlite3.connect(str(DB_PATH))
-    try:
-        # 增长预警：SQLite COUNT(*) 无 WHERE 时使用 B-tree 根页 nRec，O(1)
-        row_count = db.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    except sqlite3.Error as e:
-        db.close()
-        print(f"⚠️  嵌入库不可读（{e}）；请跑 "
-              f"python .meta/scripts/embed.py --full 重建", file=sys.stderr)
-        return None
-    if row_count > EMBEDDINGS_WARN_THRESHOLD:
-        print(
-            f"⚠️  embeddings 表已 {row_count} 行（阈值 {EMBEDDINGS_WARN_THRESHOLD}），"
-            f"全表余弦扫描可能变慢。考虑定期清理旧块或引入 ANN 索引。",
-            file=sys.stderr,
-        )
-    if row_count == 0:
-        db.close()
-        print("⚠️  嵌入库为空（可能正在重建）。请用 --bm25，或跑 "
-              "python .meta/scripts/embed.py --full", file=sys.stderr)
-        return None
-
-    # 先用元数据核对，再加载模型：不一致时不白付一次模型加载/网络调用
-    meta = read_meta(db)
-    if meta and meta['model'] != cfg['model']:
-        db.close()
-        print(f"⚠️  嵌入库为 {meta['model']}（{meta['dim']} 维），当前来源为 "
-              f"{cfg['model']}；请重建：python .meta/scripts/embed.py --full",
-              file=sys.stderr)
-        return None
+        return _fail('LOCAL_UNAVAILABLE', f"语义层不可用：{embed_unavailable_hint(cfg)}")
 
     try:
-        client = get_embeddings_client(
-            cfg, timeout=float(ENV.get('EMBED_QUERY_TIMEOUT') or 20))
-        q_vecs = client.embed_batch([query])
-    except Exception as e:
-        db.close()
-        print(f"⚠️  嵌入来源不可用：{e}", file=sys.stderr)
-        return None
-    if not q_vecs or q_vecs[0] is None:
-        db.close()
-        print("⚠️  查询嵌入失败，请重试或检查嵌入来源配置", file=sys.stderr)
-        return None
-    q_vec = np.array(q_vecs[0], dtype='<f4')
-    q_norm = float(np.linalg.norm(q_vec))
-    if meta and meta['dim'] != len(q_vec):
-        db.close()
-        print(f"⚠️  嵌入库为 {meta['dim']} 维，当前来源返回 {len(q_vec)} 维；"
-              f"请重建：python .meta/scripts/embed.py --full", file=sys.stderr)
-        return None
+        db = _open_db_ro()
+    except _AskFailure as exc:
+        return _fail(exc.code, exc.message)
 
-    # 分批解码：语义层在大库上可能是数万行，一次性 join 会有内存峰值。
-    # 用 rowid 递增翻页（OFFSET 会随表变化漂移）。
-    best = {}
-    batch = 2048
-    last_rowid = 0
-    dim = len(q_vec)
-    while True:
-        rows = db.execute(
-            "SELECT rowid, path, embedding FROM embeddings WHERE rowid > ? "
-            "ORDER BY rowid LIMIT ?", (last_rowid, batch)).fetchall()
-        if not rows:
-            break
-        last_rowid = rows[-1][0]
-        sel = [(p, b) for _, p, b in rows if path_matches_scope(p, scope)]
-        if not sel:
-            continue
-        if any(len(b) != dim * 4 for _, b in sel):
-            db.close()
-            print("⚠️  嵌入库中存在维度不一致的记录，请重建："
-                  "python .meta/scripts/embed.py --full", file=sys.stderr)
-            return None
-        mat = np.frombuffer(b''.join(b for _, b in sel), dtype='<f4').reshape(len(sel), dim)
-        sims = (mat @ q_vec) / (np.linalg.norm(mat, axis=1) * q_norm + 1e-10)
-        for (path, _), sim in zip(sel, sims):
-            s = float(sim)
-            if path not in best or s > best[path]:
-                best[path] = s
-    db.close()
+    try:
+        try:
+            # 增长预警：SQLite COUNT(*) 无 WHERE 时使用 B-tree 根页 nRec，O(1)
+            row_count = db.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        except sqlite3.Error as e:
+            return _fail(
+                'LOCAL_UNAVAILABLE',
+                f"嵌入库不可读（{e}）；请跑 python .meta/scripts/embed.py --full 重建",
+            )
+        if row_count > EMBEDDINGS_WARN_THRESHOLD:
+            print(
+                f"⚠️  embeddings 表已 {row_count} 行（阈值 {EMBEDDINGS_WARN_THRESHOLD}），"
+                f"全表余弦扫描可能变慢。考虑定期清理旧块或引入 ANN 索引。",
+                file=sys.stderr,
+            )
+        if row_count == 0:
+            return _fail(
+                'LOCAL_UNAVAILABLE',
+                '嵌入库为空（可能正在重建）。请用 --bm25，或跑 python .meta/scripts/embed.py --full',
+            )
+
+        # 先用元数据核对，再加载模型：不一致时不白付一次模型加载/网络调用
+        meta = read_meta(db)
+        if meta and meta['model'] != cfg['model']:
+            return _fail(
+                'PROFILE_MISMATCH',
+                f"嵌入库为 {meta['model']}（{meta['dim']} 维），当前来源为 "
+                f"{cfg['model']}；请重建：python .meta/scripts/embed.py --full",
+            )
+
+        try:
+            q_raw = _embed_single_query(query, cfg, meta)
+        except requests.exceptions.HTTPError as e:
+            status_code = getattr(getattr(e, 'response', None), 'status_code', None)
+            if status_code in (401, 403):
+                return _fail('REMOTE_AUTH_REQUIRED', f"嵌入端点鉴权失败（HTTP {status_code}）：{e}")
+            return _fail('LOCAL_UNAVAILABLE', f"嵌入来源不可用：{e}")
+        except Exception as e:
+            return _fail('LOCAL_UNAVAILABLE', f"嵌入来源不可用：{e}")
+        if q_raw is None:
+            return _fail('LOCAL_UNAVAILABLE', '查询嵌入失败，请重试或检查嵌入来源配置')
+
+        q_vec = np.array(q_raw, dtype='<f4')
+        q_norm = float(np.linalg.norm(q_vec))
+        if q_vec.ndim != 1 or len(q_vec) == 0 or not np.all(np.isfinite(q_vec)) or not math.isfinite(q_norm) or q_norm <= 0.0:
+            return _fail('PROFILE_MISMATCH', '查询向量无效（维度、有限值或范数校验失败）')
+        if meta and meta['dim'] != len(q_vec):
+            return _fail(
+                'PROFILE_MISMATCH',
+                f"嵌入库为 {meta['dim']} 维，当前来源返回 {len(q_vec)} 维；"
+                f"请重建：python .meta/scripts/embed.py --full",
+            )
+
+        # 分批解码：语义层在大库上可能是数万行，一次性 join 会有内存峰值。
+        # 用 rowid 递增翻页（OFFSET 会随表变化漂移）。
+        best = {}  # path -> (best_sim, chunk_index)
+        batch = 2048
+        last_rowid = 0
+        dim = len(q_vec)
+        while True:
+            rows = db.execute(
+                "SELECT rowid, path, chunk_index, embedding FROM embeddings WHERE rowid > ? "
+                "ORDER BY rowid LIMIT ?", (last_rowid, batch)).fetchall()
+            if not rows:
+                break
+            last_rowid = rows[-1][0]
+            sel = [(p, ci, b) for _, p, ci, b in rows if path_matches_scope(p, scope)]
+            if not sel:
+                continue
+            if any(len(b) != dim * 4 for _, _, b in sel):
+                return _fail(
+                    'PROFILE_MISMATCH',
+                    '嵌入库中存在维度不一致的记录，请重建：python .meta/scripts/embed.py --full',
+                )
+            mat = np.frombuffer(b''.join(b for _, _, b in sel), dtype='<f4').reshape(len(sel), dim)
+            sims = (mat @ q_vec) / (np.linalg.norm(mat, axis=1) * q_norm + 1e-10)
+            for (path, chunk_idx, _), sim in zip(sel, sims):
+                s = float(sim)
+                if path not in best or s > best[path][0]:
+                    best[path] = (s, int(chunk_idx))
+    finally:
+        db.close()
+
+    # 批量预填 git 日期（若启用衰减且 file-dates.json 有 miss），杜绝 N+1 git 子进程
+    eff_decay = (1.0, 0.8, 0.5) if decay_params is None else decay_params
+    if best and not all(v == 1.0 for v in eff_decay):
+        _preload_file_dates(best.keys())
 
     # 应用时间衰减后重新排序
-    return sorted(
-        [(p, apply_time_decay(p, s, decay_params)) for p, s in best.items()],
-        key=lambda x: -x[1]
+    ranked = sorted(
+        [(p, apply_time_decay(p, s, decay_params)) for p, (s, _) in best.items()],
+        key=lambda x: (-x[1], x[0])
     )[:top_k]
+    chunk_meta = {p: (best[p][1], 'dense') for p, _ in ranked}
+    return ranked, chunk_meta
 
 
-def _run_bm25(query, top_k, scope):
-    """BM25 检索。索引缺失/损坏/失败返回 None，与"查到了 0 条"区分开。"""
+def semantic_search(query: str, top_k=5, scope='notes', decay_params=None):
+    results, _ = _semantic_search_core(
+        query, top_k=top_k, scope=scope, decay_params=decay_params, raise_on_error=False
+    )
+    return results
+
+
+def _run_bm25_with_chunks(query, top_k, scope):
+    """BM25 检索，返回 `(results, chunk_meta)`；索引缺失/损坏/失败返回 `(None, {})`。"""
     if bm25_search is None or not (VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz').exists():
-        return None
+        return None, {}
     try:
         raw = bm25_search(query, top_k=top_k * 4)
     except Exception as e:
         print(f"⚠️  BM25 检索失败: {e}", file=sys.stderr)
-        return None
+        return None, {}
     if raw is None:          # 索引损坏/旧版本：已由 bm25_index 打印原因
-        return None
-    return [
-        # 过取 4 倍以容纳 scope 过滤（bm25 索引按 scope='all' 构建，含 memory）
-        (path, score)
-        for path, chunk_idx, score in raw
-        if path_matches_scope(path, scope)
-    ][:top_k]
+        return None, {}
+    by_path = {}  # path -> (best_score, chunk_idx)
+    for path, chunk_idx, score in raw:
+        if not path_matches_scope(path, scope):
+            continue
+        s = float(score)
+        if path not in by_path or s > by_path[path][0]:
+            by_path[path] = (s, int(chunk_idx))
+    ranked = sorted(
+        ((p, v[0]) for p, v in by_path.items()),
+        key=lambda x: (-x[1], x[0]),
+    )[:top_k]
+    chunk_meta = {p: (by_path[p][1], 'bm25') for p, _ in ranked}
+    return ranked, chunk_meta
+
+
+def _run_bm25(query, top_k, scope):
+    """BM25 检索。索引缺失/损坏/失败返回 None，与"查到了 0 条"区分开。"""
+    results, _ = _run_bm25_with_chunks(query, top_k, scope)
+    return results
 
 
 def print_results(results):
@@ -699,41 +988,62 @@ def deep_search(query, iterations=3, breadth=5, scope='notes', decay_params=None
     return round_outputs
 
 
-def hybrid_search(query, top_k=5, scope='notes', decay_params=None, weights=(0.6, 0.4)):
-    """BM25 + Dense 融合检索"""
+def _hybrid_search_core(query, top_k=5, scope='notes', decay_params=None,
+                        weights=(0.6, 0.4), *, raise_on_error: bool = False):
+    """BM25 + Dense 融合检索，返回 `(results, chunk_meta)`。"""
     w_dense, w_bm25 = weights
 
     # Dense search
-    dense_results = semantic_search(query, top_k=top_k*2, scope=scope, decay_params=decay_params)
+    dense_results, dense_meta = _semantic_search_core(
+        query, top_k=top_k * 2, scope=scope, decay_params=decay_params,
+        raise_on_error=raise_on_error,
+    )
 
     # BM25 search
-    try:
-        bm25_raw = bm25_search(query, top_k=top_k*2)
-    except Exception as e:
-        print(f"⚠️  BM25 检索失败，退化为纯 Dense: {e}", file=sys.stderr)
-        return dense_results
+    bm25_raw = None
+    if bm25_search is not None:
+        try:
+            bm25_raw = bm25_search(query, top_k=top_k * 4)
+        except Exception as e:
+            print(f"⚠️  BM25 检索失败，退化为纯 Dense: {e}", file=sys.stderr)
+            return (dense_results[:top_k] if dense_results is not None else None), dense_meta
     if bm25_raw is None:
         if dense_results is None:
+            if raise_on_error:
+                raise _AskFailure('LOCAL_UNAVAILABLE', '语义层与 BM25 均不可用')
             print("⚠️  语义层与 BM25 均不可用", file=sys.stderr)
-            return None
+            return None, {}
         print("⚠️  BM25 索引不可用，hybrid 退化为纯 Dense", file=sys.stderr)
-        return dense_results
+        return dense_results[:top_k], dense_meta
     if dense_results is None:
         # 语义层运行时不可用：退回纯 BM25（调用方会标注降级）
         print("⚠️  语义层不可用，hybrid 退化为纯 BM25", file=sys.stderr)
         best = {}
-        for path, _chunk, score in bm25_raw:
-            best[path] = max(best.get(path, 0.0), score)
-        return sorted(best.items(), key=lambda x: -x[1])[:top_k]
+        for path, chunk_idx, score in bm25_raw:
+            if not path_matches_scope(path, scope):
+                continue
+            s = float(score)
+            if path not in best or s > best[path][0]:
+                best[path] = (s, int(chunk_idx))
+        ranked = sorted(((p, v[0]) for p, v in best.items()), key=lambda x: (-x[1], x[0]))[:top_k]
+        return ranked, {p: (best[p][1], 'bm25') for p, _ in ranked}
 
-    # Build lookup: path -> {dense_score, bm25_score}
+    # Build lookup: path -> {dense, bm25, chunk_meta}
     combined = {}
     for path, sim in dense_results:
-        combined[path] = {'dense': sim, 'bm25': 0.0}
+        combined[path] = {'dense': sim, 'bm25': 0.0, 'chunk': dense_meta.get(path)}
     for path, chunk_idx, score in bm25_raw:
+        if not path_matches_scope(path, scope):
+            continue
         if path not in combined:
-            combined[path] = {'dense': 0.0, 'bm25': 0.0}
-        combined[path]['bm25'] = max(combined[path]['bm25'], score)
+            combined[path] = {'dense': 0.0, 'bm25': 0.0, 'chunk': None}
+        if float(score) > combined[path]['bm25']:
+            combined[path]['bm25'] = float(score)
+            if combined[path]['chunk'] is None:
+                combined[path]['chunk'] = (int(chunk_idx), 'bm25')
+
+    if not combined:
+        return [], {}
 
     # Normalize scores (min-max)
     dense_vals = [v['dense'] for v in combined.values()]
@@ -752,27 +1062,38 @@ def hybrid_search(query, top_k=5, scope='notes', decay_params=None, weights=(0.6
         b_norm = (scores['bm25'] - b_min) / b_range
         fused[path] = w_dense * d_norm + w_bm25 * b_norm
 
-    return sorted(fused.items(), key=lambda x: -x[1])[:top_k]
+    ranked = sorted(fused.items(), key=lambda x: (-x[1], x[0]))[:top_k]
+    chunk_meta = {p: combined[p]['chunk'] for p, _ in ranked if combined[p]['chunk'] is not None}
+    return ranked, chunk_meta
+
+
+def hybrid_search(query, top_k=5, scope='notes', decay_params=None, weights=(0.6, 0.4)):
+    """BM25 + Dense 融合检索"""
+    results, _ = _hybrid_search_core(
+        query, top_k=top_k, scope=scope, decay_params=decay_params,
+        weights=weights, raise_on_error=False,
+    )
+    return results
 
 
 def rerank_results(query, results, top_m=5):
     """对检索结果做 LLM-as-Judge 精排"""
-    import sqlite3
-
     if not results:
         return results
 
-    # Get chunk texts from embeddings.sqlite
-    db = sqlite3.connect(str(DB_PATH))
-    candidates = []
-    for path, sim in results[:20]:  # Take top-20 for reranking
-        rows = db.execute(
-            "SELECT chunk_index, chunk_text FROM embeddings WHERE path = ? ORDER BY chunk_index",
-            (path,)
-        ).fetchall()
-        for chunk_idx, text in rows:
-            candidates.append((path, chunk_idx, text))
-    db.close()
+    # Get chunk texts from embeddings.sqlite (read-only)
+    db = _open_db_ro()
+    try:
+        candidates = []
+        for path, sim in results[:20]:  # Take top-20 for reranking
+            rows = db.execute(
+                "SELECT chunk_index, chunk_text FROM embeddings WHERE path = ? ORDER BY chunk_index",
+                (path,)
+            ).fetchall()
+            for chunk_idx, text in rows:
+                candidates.append((path, chunk_idx, text))
+    finally:
+        db.close()
 
     if not candidates:
         return results[:top_m]
@@ -857,7 +1178,10 @@ def _check_tag_miss(results: list, query: str) -> bool:
 
 
 def _log_escalation(query, triggers, branches, top1_path, top1_score, new_hits):
-    """向 .meta/escalation-stats.jsonl 追加一行校准记录（A.4）。失败静默。"""
+    """向 .meta/escalation-stats.jsonl 追加一行校准记录（A.4）。失败静默。
+    --no-log / --json 下完全跳过。"""
+    if not _telemetry_enabled():
+        return
     try:
         ensure_parent(ESCALATION_STATS_LOG)
         entry = {
@@ -876,7 +1200,8 @@ def _log_escalation(query, triggers, branches, top1_path, top1_score, new_hits):
         pass
 
 
-def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=True):
+def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=True,
+                  chunk_meta: dict | None = None):
     """低置信自动升级（Phase 1a）。仅在默认 dense 查询路径调用。
 
     触发（独立 OR）：low_confidence / tag_miss / gray_zone。
@@ -910,12 +1235,18 @@ def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=Tr
     # 分支 1+4：hybrid（BM25 重权，扩召回）——对所有触发都跑（recall 不足时用 ESCALATION_RECALL_TOP_K）
     hyb_k = ESCALATION_RECALL_TOP_K if low_conf else max(top_k, 10)
     try:
-        hyb = hybrid_search(query, top_k=hyb_k, scope=scope,
-                            decay_params=decay_params, weights=ESCALATION_HYBRID_WEIGHTS)
-        for p, s in hyb:
-            if p not in best or s > best[p]:
-                best[p] = s
-        branches.append('hybrid')
+        hyb, hyb_cm = _hybrid_search_core(
+            query, top_k=hyb_k, scope=scope,
+            decay_params=decay_params, weights=ESCALATION_HYBRID_WEIGHTS,
+            raise_on_error=False,
+        )
+        if hyb:
+            for p, s in hyb:
+                if p not in best or s > best[p]:
+                    best[p] = s
+                if chunk_meta is not None and p not in chunk_meta and p in hyb_cm:
+                    chunk_meta[p] = hyb_cm[p]
+            branches.append('hybrid')
     except Exception as e:
         branches.append(f'hybrid_failed:{type(e).__name__}')
 
@@ -945,14 +1276,184 @@ def auto_escalate(query, results, *, top_k, scope, decay_params, allow_rerank=Tr
         except Exception as e:
             branches.append(f'rerank_failed:{type(e).__name__}')
 
-    merged = sorted(best.items(), key=lambda x: -x[1])[:top_k]
+    merged = sorted(best.items(), key=lambda x: (-x[1], x[0]))[:top_k]
     new_hits = [p for p, _ in merged if p not in orig_paths]
     _log_escalation(query, triggers, branches, top1_path, top1_score, new_hits)
     return merged, branches
 
 
-def main():
-    log_script_run()
+def _resolve_chunk_text(path: str, chunk_index, source: str | None,
+                        db: sqlite3.Connection | None, meta: dict | None) -> str | None:
+    """按 embed.chunk_text() 精确还原命中 chunk 原文。
+
+    - dense 命中：按 embed_meta 的 chunk_chars/chunk_overlap 切分，并与 embeddings.chunk_text 核对防陈旧；
+    - bm25 命中：按 BM25 固定分块粒度 (3000/300) 切分，不依赖 embeddings.sqlite；
+    - 越界/读取失败/陈旧不匹配一律返回 None（禁止首块兜底）。
+    """
+    if chunk_index is None or not isinstance(chunk_index, int) or chunk_index < 0:
+        return None
+    try:
+        raw_text = (VAULT_ROOT / path).read_bytes().decode('utf-8')
+    except Exception:
+        return None
+    norm_text = raw_text.replace('\r\n', '\n')
+    if source == 'bm25':
+        chars, overlap = BM25_CHUNK_CHARS, BM25_CHUNK_OVERLAP
+    elif meta and meta.get('chunk_chars') and meta.get('chunk_overlap') is not None:
+        chars, overlap = int(meta['chunk_chars']), int(meta['chunk_overlap'])
+    else:
+        chars, overlap = EMBED_CHUNK_CHARS, EMBED_CHUNK_OVERLAP
+    try:
+        chunks = embed_chunk_text(norm_text, chars, overlap)
+    except Exception:
+        return None
+    if chunk_index >= len(chunks):
+        return None
+    chunk = chunks[chunk_index]
+    if source == 'dense' and db is not None:
+        try:
+            row = db.execute(
+                "SELECT chunk_text FROM embeddings WHERE path = ? AND chunk_index = ?",
+                (path, chunk_index),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is None or row[0] != chunk:
+            return None
+    if chunk in raw_text:
+        return chunk
+    if '\r\n' in raw_text:
+        chunk_crlf = chunk.replace('\n', '\r\n')
+        if chunk_crlf in raw_text:
+            return chunk_crlf
+    return None
+
+
+def _json_result_rows(results: list, chunk_meta: dict) -> list:
+    """组装 `--json` 契约的 `results[{path, score, chunk_index, chunk_text?}]`。"""
+    if not results:
+        return []
+    need_db = any(
+        (chunk_meta.get(p) or (None, None))[1] == 'dense'
+        for p, _ in results
+    )
+    db = None
+    meta = None
+    if need_db and DB_PATH.exists():
+        db = _open_db_ro()
+        meta = read_meta(db)
+    try:
+        rows = []
+        for path, score in results:
+            entry = chunk_meta.get(path)
+            chunk_index, source = entry if entry is not None else (None, None)
+            chunk = _resolve_chunk_text(path, chunk_index, source, db, meta)
+            if chunk is None:
+                rows.append({'path': path, 'score': float(score), 'chunk_index': None})
+            else:
+                rows.append({
+                    'path': path,
+                    'score': float(score),
+                    'chunk_index': int(chunk_index),
+                    'chunk_text': chunk,
+                })
+        return rows
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _flag_present(argv, name: str) -> bool:
+    for token in argv:
+        if token == '--':
+            break
+        if token == name or token.startswith(f'{name}='):
+            return True
+    return False
+
+
+def _run_json_query(args, *, query: str, top_k: int, decay_params, use_hybrid: bool,
+                    use_bm25: bool, hybrid_weights: tuple):
+    """`--json` 唯一出口：成功与失败均只向 stdout 输出单个 JSON 信封并以契约退出码退出。"""
+    if args.rerank and not llm_enabled():
+        _json_error(
+            'REMOTE_AUTH_REQUIRED',
+            '--rerank requires HARNESS_MODE=full and DEEPSEEK_API_KEY',
+            EXIT_CODE_REMOTE_AUTH_REQUIRED,
+        )
+
+    _JSON_STATE['mode'] = 'hybrid' if use_hybrid else ('bm25' if use_bm25 else 'dense')
+    chunk_meta = {}
+    try:
+        # 隔离检索过程中的任何意外 stdout 输出（如 common.py / 第三方库告警），确保 stdout 只有单个 JSON 信封
+        with contextlib.redirect_stdout(sys.stderr):
+            if use_hybrid:
+                if bm25_search is None:
+                    raise _AskFailure('LOCAL_UNAVAILABLE', 'bm25_index.py 不可用')
+                results, chunk_meta = _hybrid_search_core(
+                    query, top_k=top_k, scope=args.scope,
+                    decay_params=decay_params, weights=hybrid_weights,
+                    raise_on_error=True,
+                )
+                if results is None:
+                    raise _AskFailure('LOCAL_UNAVAILABLE', '语义层与 BM25 索引均不可用')
+            elif use_bm25:
+                results, chunk_meta = _run_bm25_with_chunks(query, top_k, args.scope)
+                if results is None:
+                    raise _AskFailure(
+                        'LOCAL_UNAVAILABLE',
+                        'BM25 索引不存在或不可用，请先运行 maintain.py 或 bm25_index.py --build',
+                    )
+            else:
+                results, chunk_meta = _semantic_search_core(
+                    query, top_k=top_k, scope=args.scope,
+                    decay_params=decay_params, raise_on_error=True,
+                )
+                if not args.check and results:
+                    _esc, _esc_log = auto_escalate(
+                        query, results, top_k=top_k, scope=args.scope,
+                        decay_params=decay_params, allow_rerank=not args.rerank,
+                        chunk_meta=chunk_meta,
+                    )
+                    if _esc_log:
+                        results = _esc
+                        _JSON_STATE['escalated'] = list(_esc_log)
+                        _JSON_STATE['mode'] = 'hybrid'
+
+            if args.rerank:
+                rerank_m = args.rerank_top_m if args.rerank_top_m is not None else min(top_k, 5)
+                results = rerank_results(query, results, top_m=rerank_m)
+                _JSON_STATE['mode'] = 'rerank'
+
+            rows = _json_result_rows(results, chunk_meta)
+    except _AskFailure as exc:
+        _json_error(exc.code, exc.message, exc.exit_code, detail=exc.detail)
+
+    detail = {
+        'mode': _JSON_STATE['mode'],
+        'escalated': list(_JSON_STATE['escalated']),
+    }
+    if _JSON_STATE['graph_fallback']:
+        detail['graph_fallback'] = True
+    _emit_json(
+        _json_envelope(True, results=rows, detail=detail, degraded=_JSON_STATE['degraded']),
+        EXIT_CODE_OK,
+    )
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    _reset_json_state()
+    _TELEMETRY['enabled'] = not (_flag_present(argv, '--json') or _flag_present(argv, '--no-log'))
+    if _flag_present(argv, '--json'):
+        _JSON_STATE['enabled'] = True
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='strict')
+        except Exception:
+            pass
+    if _telemetry_enabled():
+        log_script_run()
+
     parser = argparse.ArgumentParser(description='语义查询 / 查重 / 孤儿检测')
     parser.add_argument('--check', action='store_true', help='写前查重模式（返回 top-10）')
     parser.add_argument('--orphans', action='store_true', help='列出孤儿笔记')
@@ -980,8 +1481,21 @@ def main():
     parser.add_argument('--rerank', action='store_true', help='LLM-as-Judge 精排（DeepSeek chat API）')
     parser.add_argument('--rerank-top-m', type=int, default=None,
                         help='精排后返回 top-m（默认 min(k, 5)，k 为 --top-k 或 --deep-breadth）')
+    parser.add_argument('--json', action='store_true',
+                        help='结构化 JSON 输出（stdout 仅输出单个 JSON 信封，隐含 --no-log）')
+    parser.add_argument('--no-log', action='store_true',
+                        help='禁止写入使用日志与遥测文件（--json 下默认开启）')
     parser.add_argument('query', nargs='?', help='查询字符串')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if _json_mode() and (args.orphans or args.backlinks or args.neighbors or args.path
+                         or args.deep or args.save):
+        _json_error(
+            'INVALID_REQUEST',
+            '--json only supports plain queries (no --deep/--save/'
+            '--orphans/--backlinks/--neighbors/--path)',
+            EXIT_CODE_INVALID_REQUEST,
+        )
 
     if args.neighbors:
         if get_neighbors is None:
@@ -1016,10 +1530,81 @@ def main():
         return
 
     if not args.query:
+        if _json_mode():
+            _json_error('INVALID_REQUEST', 'query is required', EXIT_CODE_INVALID_REQUEST)
         parser.print_help()
         return
 
     query = args.query
+
+    # 解析 --decay 参数（--deep 和普通检索共享）
+    decay_params = None
+    if args.decay is not None:
+        try:
+            parts = [float(x.strip()) for x in args.decay.split(",")]
+            if len(parts) != 3:
+                print(f"⚠️  --decay 需要恰好 3 个逗号分隔值，收到 {len(parts)} 个。回退默认值 (1.0, 0.8, 0.5)。", file=sys.stderr)
+            elif not (parts[0] >= parts[1] >= parts[2] >= 0):
+                print(f"⚠️  --decay 参数需单调递减 (a>=b>=c>=0)，收到 {parts}。回退默认值 (1.0, 0.8, 0.5)。", file=sys.stderr)
+            else:
+                decay_params = tuple(parts)
+        except ValueError:
+            print(f"⚠️  --decay 解析失败 '{args.decay}'，需为三个逗号分隔的数值。回退默认值 (1.0, 0.8, 0.5)。", file=sys.stderr)
+
+    # Determine retrieval mode
+    use_hybrid = args.hybrid
+    use_bm25 = args.bm25
+
+    if use_hybrid and use_bm25:
+        if _json_mode():
+            _json_error('INVALID_REQUEST', '--hybrid and --bm25 are mutually exclusive',
+                        EXIT_CODE_INVALID_REQUEST)
+        print("错误：--hybrid 与 --bm25 互斥", file=sys.stderr)
+        sys.exit(2)
+
+    # Parse hybrid weights
+    hybrid_weights = (0.6, 0.4)
+    if args.hybrid_weights:
+        try:
+            parts = [float(x.strip()) for x in args.hybrid_weights.split(',')]
+            if len(parts) != 2:
+                if _json_mode():
+                    _json_error('INVALID_REQUEST', '--hybrid-weights needs exactly 2 values',
+                                EXIT_CODE_INVALID_REQUEST)
+                print(f"错误：--hybrid-weights 需要恰好 2 个值", file=sys.stderr)
+                sys.exit(2)
+            hybrid_weights = tuple(parts)
+        except ValueError:
+            if _json_mode():
+                _json_error('INVALID_REQUEST', '--hybrid-weights is not a number pair',
+                            EXIT_CODE_INVALID_REQUEST)
+            print(f"错误：--hybrid-weights 格式无效", file=sys.stderr)
+            sys.exit(2)
+
+    # --top-k 覆盖模式默认值；未提供时保持现有行为（普通 5，查重 10）
+    if args.top_k is not None:
+        if args.top_k < 1:
+            print(f"⚠️  --top-k 最小值为 1，收到 {args.top_k}，已截断为 1。", file=sys.stderr)
+            top_k = 1
+        elif args.top_k > 50:
+            print(f"⚠️  --top-k 最大值为 50，收到 {args.top_k}，已截断为 50。", file=sys.stderr)
+            top_k = 50
+        else:
+            top_k = args.top_k
+    else:
+        top_k = 10 if args.check else 5
+
+    # JSON 分支前置：走契约化错误码与单行信封出口，不混入文本回显
+    if _json_mode():
+        _run_json_query(
+            args,
+            query=query,
+            top_k=top_k,
+            decay_params=decay_params,
+            use_hybrid=use_hybrid,
+            use_bm25=use_bm25,
+            hybrid_weights=hybrid_weights,
+        )
 
     # ─── 能力闸门：语义层（基础）与 LLM 层（可选）分开判定 ───
     cfg = embed_settings()
@@ -1041,24 +1626,6 @@ def main():
               "语义层只提供向量召回，不提供查询扩展与精排。", file=sys.stderr)
         sys.exit(2)
 
-    # 解析 --decay 参数（--deep 和普通检索共享）
-    decay_params = None
-    if args.decay is not None:
-        try:
-            parts = [float(x.strip()) for x in args.decay.split(",")]
-            if len(parts) != 3:
-                print(f"⚠️  --decay 需要恰好 3 个逗号分隔值，收到 {len(parts)} 个。回退默认值 (1.0, 0.8, 0.5)。", file=sys.stderr)
-            elif not (parts[0] >= parts[1] >= parts[2] >= 0):
-                print(f"⚠️  --decay 参数需单调递减 (a>=b>=c>=0)，收到 {parts}。回退默认值 (1.0, 0.8, 0.5)。", file=sys.stderr)
-            else:
-                decay_params = tuple(parts)
-        except ValueError:
-            print(f"⚠️  --decay 解析失败 '{args.decay}'，需为三个逗号分隔的数值。回退默认值 (1.0, 0.8, 0.5)。", file=sys.stderr)
-
-    # Determine retrieval mode
-    use_hybrid = args.hybrid
-    use_bm25 = args.bm25
-
     if not semantic_ready and not use_bm25:
         # 语义层不可用：dense/hybrid 自动降级为 BM25，并说明原因
         if use_hybrid:
@@ -1069,10 +1636,6 @@ def main():
                   "（复杂主题检索建议由 agent 做 agentic grep/glob）", file=sys.stderr)
         use_bm25 = True
 
-    if use_hybrid and use_bm25:
-        print("错误：--hybrid 与 --bm25 互斥", file=sys.stderr)
-        sys.exit(2)
-
     if (use_hybrid or use_bm25) and bm25_search is None:
         print("错误：--bm25/--hybrid 需要 bm25_index.py。请检查 .meta/scripts/ 安装是否完整。", file=sys.stderr)
         sys.exit(1)
@@ -1080,19 +1643,6 @@ def main():
     if args.deep and use_bm25:
         print("错误：--deep 不与 --bm25 组合（BM25 不支持语义查询扩展）。请用 --hybrid --deep", file=sys.stderr)
         sys.exit(2)
-
-    # Parse hybrid weights
-    hybrid_weights = (0.6, 0.4)
-    if args.hybrid_weights:
-        try:
-            parts = [float(x.strip()) for x in args.hybrid_weights.split(',')]
-            if len(parts) != 2:
-                print(f"错误：--hybrid-weights 需要恰好 2 个值", file=sys.stderr)
-                sys.exit(2)
-            hybrid_weights = tuple(parts)
-        except ValueError:
-            print(f"错误：--hybrid-weights 格式无效", file=sys.stderr)
-            sys.exit(2)
 
     if args.deep:
         from functools import partial
@@ -1122,18 +1672,6 @@ def main():
                                method='hybrid' if use_hybrid else 'dense')
         return
 
-    # --top-k 覆盖模式默认值；未提供时保持现有行为（普通 5，查重 10）
-    if args.top_k is not None:
-        if args.top_k < 1:
-            print(f"⚠️  --top-k 最小值为 1，收到 {args.top_k}，已截断为 1。", file=sys.stderr)
-            top_k = 1
-        elif args.top_k > 50:
-            print(f"⚠️  --top-k 最大值为 50，收到 {args.top_k}，已截断为 50。", file=sys.stderr)
-            top_k = 50
-        else:
-            top_k = args.top_k
-    else:
-        top_k = 10 if args.check else 5
     mode_label = '查重' if args.check else '查询'
     if use_hybrid:
         mode_label = 'Hybrid' if not args.check else '查重(Hybrid)'
