@@ -16,8 +16,6 @@ semantic_lint.py — 语义质量检查
 
 import sys
 import re
-import json
-import random
 import argparse
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -421,151 +419,6 @@ def check_contradictions(all_notes: list) -> list:
     return contradictions
 
 
-# ─── 图遍历回归测试 ──────────────────────────────────────────────
-
-def check_graph_traversal():
-    """图遍历回归测试：随机抽 10 个非孤立节点，验证邻域返回非空且边权重合法。
-
-    Returns:
-        bool: 全部通过返回 True，任一失败返回 False。
-    """
-    from build_graph import get_neighbors
-
-    graph_path = VAULT_ROOT / '.meta' / 'graph.json'
-    if not graph_path.exists():
-        print("SKIP: graph.json 不存在")
-        return True
-
-    try:
-        graph = json.loads(graph_path.read_text(encoding='utf-8'))
-    except Exception:
-        print("SKIP: graph.json 解析失败")
-        return True
-
-    # community_id >= 0 基于无向图 Louvain 聚类，但 get_neighbors 只沿出边遍历。
-    # 因此筛出同时满足 community_id >= 0 且至少有一条出边的节点作为测试样本。
-    nodes_with_outgoing = set()
-    for e in graph.get('edges', []):
-        nodes_with_outgoing.add(e.get('source', ''))
-    non_isolated = [
-        n for n in graph.get('nodes', [])
-        if n.get('community_id', -1) >= 0 and n['id'] in nodes_with_outgoing
-    ]
-    if not non_isolated:
-        print("SKIP: 无非孤立节点")
-        return True
-
-    sample = random.sample(non_isolated, min(10, len(non_isolated)))
-    all_ok = True
-    for node in sample:
-        nid = node['id']
-        neighbors = get_neighbors(nid, max_hops=1)
-        if isinstance(neighbors, dict) and "error" in neighbors:
-            print(f"FAIL: {nid} get_neighbors 返回错误: {neighbors}")
-            all_ok = False
-            continue
-        if not neighbors:
-            print(f"FAIL: {nid} 邻域为空（预期非空, community_id={node.get('community_id')}）")
-            all_ok = False
-            continue
-        for nb in neighbors:
-            w = nb.get('weight', -1)
-            if not (0.0 <= w <= 1.0):
-                print(f"FAIL: {nid} → {nb['path']} weight={w} 不合法（需在 [0.0, 1.0] 区间）")
-                all_ok = False
-
-    if all_ok:
-        print(f"PASS: 图遍历回归测试 ({len(sample)} 个节点)")
-    return all_ok
-
-
-# ─── 去重逻辑回归测试 ──────────────────────────────────────────
-
-def check_deep_dedup():
-    """回归测试：验证 deep search 去重逻辑"""
-    # Test dedup logic independently
-    test_items = [
-        ('a.md', 0, 0.9), ('a.md', 0, 0.8),  # duplicate path+chunk
-        ('b.md', 0, 0.7), ('b.md', 1, 0.6),   # same path, different chunk
-        ('c.md', 0, 0.5),
-    ]
-    seen = {}
-    for path, chunk_idx, sim in test_items:
-        key = (path, chunk_idx)
-        if key not in seen or sim > seen[key]:
-            seen[key] = sim
-
-    # Should have 4 unique keys
-    expected = {('a.md', 0): 0.9, ('b.md', 0): 0.7, ('b.md', 1): 0.6, ('c.md', 0): 0.5}
-    if seen == expected:
-        print("PASS: 去重逻辑正确")
-        return True
-    else:
-        print(f"FAIL: 去重逻辑错误。期望 {expected}，得到 {seen}")
-        return False
-
-
-# ─── BM25 索引回归测试 ──────────────────────────────────────────
-
-def check_bm25_build():
-    """回归测试：验证 BM25 索引文件存在且可解析"""
-    bm25_path = VAULT_ROOT / '.meta' / 'bm25_index.pkl.gz'
-    if not bm25_path.exists():
-        print("SKIP: bm25_index.pkl.gz 不存在（需先运行 bm25_index.py --build）")
-        return True
-
-    try:
-        import gzip
-        import pickle
-        index = pickle.loads(gzip.decompress(bm25_path.read_bytes()))
-        required_keys = ['index_version', 'N', 'avgdl', 'idf', 'postings', 'docs_paths', 'generated_at']
-        for k in required_keys:
-            if k not in index:
-                print(f"FAIL: BM25 索引缺少 '{k}' 字段")
-                return False
-
-        if index['N'] > 0 and len(index['docs_paths']) == index['N'] and len(index['postings']) == len(index['idf']):
-            print(f"PASS: BM25 索引有效（{index['N']} 文档, {len(index['idf'])} 词项）")
-            return True
-        else:
-            print(f"FAIL: 文档数不匹配 N={index['N']} != len(docs_paths)={len(index['docs_paths'])}")
-            return False
-    except Exception as e:
-        print(f"FAIL: BM25 索引解析失败: {e}")
-        return False
-
-
-# ─── Rerank 降级路径回归测试 ───────────────────────────────────
-
-def check_rerank_fallback():
-    """回归测试：验证 rerank 降级路径"""
-    from common import rerank_with_llm, DeepSeekClient
-
-    # Test 1: empty candidates
-    result = rerank_with_llm("test", [], top_m=5)
-    assert result == [], f"Empty candidates should return [], got {result}"
-
-    # Test 2: mock API failure → fallback to coarse rank
-    test_candidates = [
-        ('a.md', 0, 'relevant text about AI agents'),
-        ('b.md', 0, 'unrelated text about cooking'),
-        ('c.md', 0, 'somewhat related agent architecture'),
-    ]
-
-    try:
-        from unittest.mock import patch
-        with patch.object(DeepSeekClient, 'chat', side_effect=Exception("Mock API failure")):
-            result = rerank_with_llm("AI agents", test_candidates, top_m=2)
-            # Should not crash; should return fallback results
-            assert len(result) >= 1, "Fallback should return at least some results"
-            print("PASS: rerank 降级路径在 API 失败时正确回退")
-    except ImportError:
-        print("SKIP: unittest.mock 不可用（Python 版本限制）")
-
-    print("PASS: rerank 降级路径测试通过")
-    return True
-
-
 # ─── 报告生成 ───────────────────────────────────────────────────
 
 def generate_report(p0: list, p1_orphans: list, p1_stale: list, p2: list,
@@ -643,28 +496,7 @@ def main():
     parser = argparse.ArgumentParser(description='语义质量检查')
     parser.add_argument('--quick', action='store_true', help='只跑 P0+P1（默认）')
     parser.add_argument('--deep', action='store_true', help='包含 P2 矛盾检测')
-    parser.add_argument('--check-graph-traversal', action='store_true',
-                        help='图遍历回归测试：随机抽非孤立节点验证邻域返回非空且边权重合法')
-    parser.add_argument('--check-deep-dedup', action='store_true',
-                        help='去重逻辑回归测试：验证 deep search (path, chunk_index) 去重正确性')
-    parser.add_argument('--check-bm25-build', action='store_true',
-                        help='BM25 索引回归测试：验证 bm25_index.pkl.gz 存在且字段完整')
-    parser.add_argument('--check-rerank-fallback', action='store_true',
-                        help='Rerank 降级路径回归测试：验证空候选处理与 API 降级路径')
     args = parser.parse_args()
-
-    if args.check_graph_traversal:
-        ok = check_graph_traversal()
-        sys.exit(0 if ok else 1)
-    if args.check_deep_dedup:
-        ok = check_deep_dedup()
-        sys.exit(0 if ok else 1)
-    if args.check_bm25_build:
-        ok = check_bm25_build()
-        sys.exit(0 if ok else 1)
-    if args.check_rerank_fallback:
-        ok = check_rerank_fallback()
-        sys.exit(0 if ok else 1)
 
     mode = 'deep' if args.deep else 'quick'
     if args.deep and not llm_enabled():

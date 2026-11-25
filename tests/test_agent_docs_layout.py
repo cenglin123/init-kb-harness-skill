@@ -1,4 +1,4 @@
-"""Cross-skill smoke tests; set AGENT_DOCS_ASSETS to the upstream assets/scripts."""
+"""Cross-skill smoke tests; resolves upstream assets/scripts from AGENT_DOCS_ASSETS or sibling init-agent-docs."""
 from pathlib import Path
 import os
 import shutil
@@ -8,10 +8,23 @@ import tempfile
 import unittest
 
 KB_SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
-DOC_ASSETS = os.environ.get('AGENT_DOCS_ASSETS')
+REQUIRED_DOC_SCRIPTS = ('changelog.py', 'audit.py', 'check_all.py', 'maintain.py')
 
 
-@unittest.skipUnless(DOC_ASSETS, 'set AGENT_DOCS_ASSETS for cross-skill integration')
+def _resolve_doc_assets():
+    env_dir = os.environ.get('AGENT_DOCS_ASSETS')
+    if env_dir:
+        return Path(env_dir)
+    sibling = Path(__file__).resolve().parents[2] / 'init-agent-docs' / 'assets' / 'scripts'
+    if all((sibling / name).is_file() for name in REQUIRED_DOC_SCRIPTS):
+        return sibling
+    return None
+
+
+DOC_ASSETS = _resolve_doc_assets()
+
+
+@unittest.skipUnless(DOC_ASSETS, 'set AGENT_DOCS_ASSETS or place init-agent-docs as a sibling repo')
 class AgentDocsLayoutTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -21,7 +34,7 @@ class AgentDocsLayoutTests(unittest.TestCase):
         for source in KB_SCRIPTS.glob('*.py'):
             if source.name != 'changelog_append.py':
                 shutil.copyfile(source, self.scripts / source.name)
-        for name in ('changelog.py', 'audit.py', 'check_all.py', 'maintain.py'):
+        for name in REQUIRED_DOC_SCRIPTS:
             shutil.copyfile(Path(DOC_ASSETS) / name, self.scripts / ('docs_maintain.py' if name == 'maintain.py' else name))
         self.write('AGENTS.md', '# Knowledge base\n## 项目记忆\n.meta/memory/MEMORY.md\n')
         self.write('.env', 'HARNESS_MODE=lite\nDEEPSEEK_API_KEY=\nZHIPU_API_KEY=\n')
@@ -85,8 +98,22 @@ class AgentDocsLayoutTests(unittest.TestCase):
         self.run_tool('audit.py', 'memory')
         self.run_tool('docs_maintain.py', '--check')
 
+    def _resolve_bash(self):
+        env_bash = os.environ.get('TEST_BASH')
+        if env_bash:
+            return env_bash
+        if os.name == 'nt':
+            git_exe = shutil.which('git')
+            if git_exe:
+                git_root = Path(git_exe).resolve().parents[1]
+                for rel in ('bin/bash.exe', 'usr/bin/bash.exe'):
+                    candidate = git_root / rel
+                    if candidate.is_file():
+                        return str(candidate)
+        return shutil.which('bash')
+
     def test_real_hook_blocks_stale_index_for_bugfix_add_delete_and_rename(self):
-        bash = os.environ.get('TEST_BASH') or shutil.which('bash')
+        bash = self._resolve_bash()
         self.assertIsNotNone(bash, 'Bash is required for actual hook verification')
         self.write('.githooks/pre-commit', (KB_SCRIPTS.parent / 'refs' / 'pre-commit-template').read_text(encoding='utf-8'))
         def git(*args):
