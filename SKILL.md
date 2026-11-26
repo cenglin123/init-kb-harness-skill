@@ -1,9 +1,9 @@
 ---
 name: init-kb-harness
-description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Default install is zero-API and includes local embeddings (fastembed/bge-small-zh) plus BM25, graph, and office extraction; semantic recall is baseline, not optional. The LLM layer (summaries/rerank) is opt-in via DeepSeek. Embedding endpoint may be switched to any OpenAI-compatible /embeddings (local Ollama/vLLM or cloud). Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Existing harnesses use only the explicit agent-docs layout migration when requested; do not rebootstrap them.
+description: Initialize a self-maintaining knowledge-base harness on an Obsidian vault (possibly immature/empty, or office-document-heavy). Aliases: IKB / ikb. Default install is zero-API and includes local embeddings (fastembed/bge-small-zh) plus BM25, graph, and office extraction; semantic recall is baseline, not optional. The LLM layer (summaries/rerank) is opt-in via DeepSeek. Embedding endpoint may be switched to any OpenAI-compatible /embeddings (local Ollama/vLLM or cloud). Scaffolds maintenance pipeline + office extraction + memory + converge governance as a full install (Phase 1→2→3 all required). Use when the user says "IKB" / "ikb" / "给这个仓库装知识库系统" / "bootstrap kb harness" / "init knowledge base" / wants to turn a plain Obsidian vault into a self-maintaining second-brain. Existing harnesses use only the explicit agent-docs layout migration when requested; do not rebootstrap them.
 ---
 
-# init-kb-harness · 知识库 Harness 引导器
+# init-kb-harness（别名：IKB / ikb）· 知识库 Harness 引导器
 
 给**任意** Obsidian 仓库（含不健全/空仓库、office 文档为主的仓库）从零建立一套可自维护、自沉淀、自运行的 harness 框架。**Phase 1→2→3 全量必装**，一次 bootstrap 顺序完成。
 
